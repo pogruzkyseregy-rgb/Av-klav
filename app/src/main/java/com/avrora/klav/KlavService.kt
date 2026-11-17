@@ -20,7 +20,7 @@ import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
-import android.view.WindowInsets
+import android.view.WindowInsetsController
 import android.view.inputmethod.EditorInfo
 import android.widget.FrameLayout
 import android.widget.LinearLayout
@@ -67,6 +67,7 @@ class KlavService : InputMethodService() {
     private lateinit var rootView: FrameLayout
     private lateinit var titleView: TextView
     private lateinit var suggestBar: LinearLayout
+    private lateinit var suggestChips: List<TextView>
     private lateinit var keysArea: LinearLayout
     private lateinit var clipScroll: ScrollView
     private lateinit var clipList: LinearLayout
@@ -157,6 +158,12 @@ class KlavService : InputMethodService() {
 
     override fun onCreate() {
         super.onCreate()
+        Words.init(this)
+        // Словари грузятся в фоне, чтобы первое нажатие не тормозило.
+        Thread {
+            Words.suggestions("пр", true)
+            Words.suggestions("th", false)
+        }.start()
         clipboard.addPrimaryClipChangedListener(clipListener)
         tone = try {
             ToneGenerator(AudioManager.STREAM_SYSTEM, 35)
@@ -174,19 +181,8 @@ class KlavService : InputMethodService() {
     }
 
     override fun onCreateInputView(): View {
-        // Окно клавиатуры рисуется под системной нижней панелью, чтобы не было белой полосы.
-        window.window?.let { w ->
-            w.navigationBarColor = Color.TRANSPARENT
-            if (Build.VERSION.SDK_INT >= 29) w.isNavigationBarContrastEnforced = false
-            if (Build.VERSION.SDK_INT >= 30) w.setDecorFitsSystemWindows(false)
-        }
-
         val root = FrameLayout(this)
         rootView = root
-        root.setOnApplyWindowInsetsListener { v, insets ->
-            v.setPadding(0, 0, 0, navBottom(insets))
-            insets
-        }
 
         val column = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -194,11 +190,11 @@ class KlavService : InputMethodService() {
         }
         column.addView(buildTopBar(), LinearLayout.LayoutParams(MATCH, WRAP))
 
-        suggestBar = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            visibility = View.GONE
-        }
-        column.addView(suggestBar, LinearLayout.LayoutParams(MATCH, WRAP))
+        // Строка подсказок всегда занимает место, поэтому клавиши не прыгают при наборе.
+        suggestBar = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        suggestChips = List(3) { buildSuggestChip() }
+        suggestChips.forEach { suggestBar.addView(it) }
+        column.addView(suggestBar, LinearLayout.LayoutParams(MATCH, dp(38)))
 
         keysArea = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         column.addView(keysArea, LinearLayout.LayoutParams(MATCH, WRAP))
@@ -219,17 +215,8 @@ class KlavService : InputMethodService() {
         root.addView(column, FrameLayout.LayoutParams(MATCH, WRAP))
         applyAppearance()
         rebuildKeys()
-        root.requestApplyInsets()
         return root
     }
-
-    @Suppress("DEPRECATION")
-    private fun navBottom(insets: WindowInsets): Int =
-        if (Build.VERSION.SDK_INT >= 30) {
-            insets.getInsets(WindowInsets.Type.navigationBars()).bottom
-        } else {
-            insets.systemWindowInsetBottom
-        }
 
     override fun onStartInputView(info: EditorInfo?, restarting: Boolean) {
         super.onStartInputView(info, restarting)
@@ -248,8 +235,25 @@ class KlavService : InputMethodService() {
 
     // ---------- Внешний вид ----------
 
+    /**
+     * Фон клавиатуры и нижняя системная панель берутся из одной картинки,
+     * поэтому полоса с кнопками «свернуть» и «сменить клавиатуру» выглядит частью фона.
+     */
     private fun applyAppearance() {
-        rootView.background = Appearance.backgroundDrawable(this, Prefs.bgUri(this), Prefs.dim(this))
+        val uri = Prefs.bgUri(this)
+        val dim = Prefs.dim(this)
+        rootView.background = Appearance.backgroundDrawable(this, uri, dim)
+        window.window?.let { w ->
+            val color = Appearance.navColor(this, uri, dim)
+            w.navigationBarColor = color
+            if (Build.VERSION.SDK_INT >= 29) w.isNavigationBarContrastEnforced = false
+            if (Build.VERSION.SDK_INT >= 30) {
+                // Светлая полоса — тёмные значки, тёмная — светлые.
+                val lum = 0.299 * Color.red(color) + 0.587 * Color.green(color) + 0.114 * Color.blue(color)
+                val flag = if (lum > 140) WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS else 0
+                w.insetsController?.setSystemBarsAppearance(flag, WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS)
+            }
+        }
     }
 
     // ---------- Верхняя панель ----------
@@ -305,12 +309,16 @@ class KlavService : InputMethodService() {
             setPadding(dp(12), dp(6), dp(12), dp(6))
         }
         col.addView(hint("Визуал"))
-        col.addView(slider("Затемнение фона", 90, Prefs.dim(this)) {
+        col.addView(slider("Затемнение фона", 90, Prefs.dim(this), 0, "%") {
             Prefs.setDim(this, it)
             applyAppearance()
         })
-        col.addView(slider("Прозрачность клавиш", 100, Prefs.keyAlpha(this)) {
+        col.addView(slider("Прозрачность клавиш", 100, Prefs.keyAlpha(this), 0, "%") {
             Prefs.setKeyAlpha(this, it)
+            rebuildKeys()
+        })
+        col.addView(slider("Размер букв", 14, Prefs.keySp(this), 12, " sp") {
+            Prefs.setKeySp(this, it)
             rebuildKeys()
         })
         col.addView(hint("Отклик и анимации"))
@@ -335,20 +343,31 @@ class KlavService : InputMethodService() {
         return col
     }
 
-    private fun slider(title: String, maxValue: Int, value: Int, onChange: (Int) -> Unit): LinearLayout {
+    /**
+     * Ползунок. [value] — текущее значение, [offset] — наименьшее значение ползунка,
+     * [suffix] — единица в подписи.
+     */
+    private fun slider(
+        title: String,
+        maxValue: Int,
+        value: Int,
+        offset: Int,
+        suffix: String,
+        onChange: (Int) -> Unit
+    ): LinearLayout {
         val box = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(0, dp(4), 0, dp(4))
         }
-        val label = hint("$title: $value%")
+        val label = hint("$title: $value$suffix")
         box.addView(label)
         box.addView(SeekBar(this).apply {
             max = maxValue
-            progress = value
+            progress = value - offset
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(sb: SeekBar?, p: Int, fromUser: Boolean) {
-                    label.text = "$title: $p%"
-                    if (fromUser) onChange(p)
+                    label.text = "$title: ${p + offset}$suffix"
+                    if (fromUser) onChange(p + offset)
                 }
 
                 override fun onStartTrackingTouch(sb: SeekBar?) {}
@@ -377,34 +396,35 @@ class KlavService : InputMethodService() {
 
     // ---------- Подсказки слов ----------
 
-    private fun updateSuggestions() {
-        if (!::suggestBar.isInitialized) return
-        suggestBar.removeAllViews()
-        if (!Prefs.suggest(this) || panel != Panel.KEYS) {
-            suggestBar.visibility = View.GONE
-            return
+    private fun buildSuggestChip(): TextView = TextView(this).apply {
+        gravity = Gravity.CENTER
+        setTextColor(TEXT)
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+        background = roundRect(Appearance.keyFill(Prefs.keyAlpha(this@KlavService)), STROKE)
+        layoutParams = LinearLayout.LayoutParams(0, dp(32), 1f).apply {
+            setMargins(dp(2), dp(3), dp(2), dp(3))
         }
+    }
+
+    /** Заполняет три постоянные ячейки; пустые ячейки не меняют высоту строки. */
+    private fun updateSuggestions() {
+        if (!::suggestChips.isInitialized) return
+        val visible = Prefs.suggest(this) && panel == Panel.KEYS
+        suggestBar.visibility = if (visible) View.VISIBLE else View.INVISIBLE
+        if (!visible) return
         val before = currentInputConnection?.getTextBeforeCursor(30, 0)?.toString() ?: ""
         val prefix = before.takeLastWhile { it.isLetter() }
-        val words = Words.suggest(prefix, lastLetterMode == Mode.RU)
-        if (words.isEmpty()) {
-            suggestBar.visibility = View.GONE
-            return
-        }
-        suggestBar.visibility = View.VISIBLE
-        words.forEach { w ->
-            val shown = Words.applyCase(prefix, w)
-            suggestBar.addView(TextView(this).apply {
-                text = shown
-                gravity = Gravity.CENTER
-                setTextColor(TEXT)
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-                background = roundRect(Appearance.keyFill(Prefs.keyAlpha(this@KlavService)), STROKE)
-                layoutParams = LinearLayout.LayoutParams(0, dp(34), 1f).apply {
-                    setMargins(dp(2), dp(2), dp(2), dp(2))
-                }
-                setOnClickListener { acceptSuggestion(prefix, shown) }
-            })
+        val words = Words.suggestions(prefix, lastLetterMode == Mode.RU)
+        suggestChips.forEachIndexed { i, chip ->
+            val w = words.getOrNull(i)
+            if (w == null) {
+                chip.text = ""
+                chip.setOnClickListener(null)
+            } else {
+                val shown = Words.applyCase(prefix, w)
+                chip.text = shown
+                chip.setOnClickListener { acceptSuggestion(prefix, shown) }
+            }
         }
     }
 
@@ -473,6 +493,9 @@ class KlavService : InputMethodService() {
 
     // ---------- Раскладка ----------
 
+    /** Высота клавиши растёт вместе с размером букв, чтобы крупный текст не обрезался. */
+    private fun keyHeightDp(): Int = 44 + maxOf(0, Prefs.keySp(this) - 17) * 2
+
     private fun rebuildKeys() {
         keysArea.removeAllViews()
         val rows = when (mode) {
@@ -529,13 +552,13 @@ class KlavService : InputMethodService() {
         TextView(this).apply {
             text = label
             gravity = Gravity.CENTER
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 17f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, Prefs.keySp(this@KlavService).toFloat())
             setTextColor(if (active) BG else TEXT)
             background = roundRect(
                 if (active) CYAN else Appearance.keyFill(Prefs.keyAlpha(this@KlavService)),
                 if (active) CYAN else STROKE
             )
-            layoutParams = LinearLayout.LayoutParams(0, dp(46), weight).apply {
+            layoutParams = LinearLayout.LayoutParams(0, dp(keyHeightDp()), weight).apply {
                 setMargins(dp(2), dp(3), dp(2), dp(3))
             }
             setOnTouchListener { v, e ->
@@ -675,7 +698,7 @@ class KlavService : InputMethodService() {
         }
     }
 
-    /** Заменяет последнее слово, если оно есть в списке опечаток. */
+    /** Заменяет последнее слово, если оно похоже на опечатку из словаря. */
     private fun autoCorrectWord() {
         if (!Prefs.autoCorrect(this)) return
         val ic = currentInputConnection ?: return

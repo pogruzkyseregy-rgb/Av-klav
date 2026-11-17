@@ -1,21 +1,32 @@
 package com.avrora.klav
 
-/** Небольшой встроенный словарь: автозамена опечаток и подсказки слов. */
+import android.content.Context
+import kotlin.math.abs
+import kotlin.math.min
+
+/**
+ * Словарь клавиатуры: частотные списки слов (25 000 на язык, по убыванию частоты),
+ * исправление опечаток по расстоянию Дамерау–Левенштейна и подсказки по префиксу.
+ */
 internal object Words {
 
-    /** Частые опечатки (ключ — в нижнем регистре). */
+    private class Dict(val words: List<String>, val rank: Map<String, Int>)
+
+    private var appCtx: Context? = null
+
+    private val ru: Dict by lazy { load(R.raw.words_ru) }
+    private val en: Dict by lazy { load(R.raw.words_en) }
+
+    /** Ручные исправления, они важнее словаря. */
     private val FIXES: Map<String, String> = mapOf(
-        // русский
-        "привет" to "привет", "превет" to "привет", "приввет" to "привет",
         "спосибо" to "спасибо", "спасибио" to "спасибо", "спс" to "спасибо",
         "пожалуста" to "пожалуйста", "извени" to "извини", "здравствуте" to "здравствуйте",
         "сегодя" to "сегодня", "сегоння" to "сегодня", "сегдня" to "сегодня",
         "завтро" to "завтра", "коненчо" to "конечно", "канечно" to "конечно",
         "вобщем" to "в общем", "вообщем" to "в общем", "врядли" to "вряд ли",
         "потомучто" to "потому что", "тоесть" to "то есть", "сичас" to "сейчас",
-        "щяс" to "сейчас", "ещо" to "ещё", "каждй" to "каждый", "инчае" to "иначе",
-        "ненадо" to "не надо", "немогу" to "не могу", "ктото" to "кто-то",
-        // английский
+        "щяс" to "сейчас", "ещо" to "ещё", "инчае" to "иначе", "ненадо" to "не надо",
+        "немогу" to "не могу", "ктото" to "кто-то", "каждй" to "каждый",
         "teh" to "the", "hte" to "the", "adn" to "and", "taht" to "that", "wiht" to "with",
         "recieve" to "receive", "wierd" to "weird", "definately" to "definitely",
         "seperate" to "separate", "occured" to "occurred", "tommorow" to "tomorrow",
@@ -28,49 +39,97 @@ internal object Words {
         "i" to "I"
     )
 
-    private val RU_WORDS = listOf(
-        "привет", "пожалуйста", "спасибо", "конечно", "сегодня", "завтра", "вчера", "сейчас",
-        "потому", "потому что", "может", "можно", "нужно", "надо", "очень", "просто", "хорошо",
-        "нормально", "давай", "всё", "будет", "сделать", "сделаю", "наверное", "понятно",
-        "извини", "извините", "здравствуйте", "пока", "когда", "почему", "зачем", "сколько",
-        "сообщение", "телефон", "клавиатура", "приложение", "фото", "видео", "вообще", "именно",
-        "ладно", "спокойной", "ночи", "доброе", "утро", "день", "вечер", "работа", "дома",
-        "друг", "люди", "время", "потом", "тоже", "также", "ещё", "уже", "если", "чтобы",
-        "который", "которые", "мне", "тебе", "тебя", "меня", "нам", "вам", "они", "она", "он",
-        "мы", "вы", "ты", "это", "эта", "этот", "как", "что", "где", "кто", "там", "тут", "здесь",
-        "есть", "нет", "быть", "было", "была", "были", "хочу", "хочешь", "могу", "можешь",
-        "знаю", "знаешь", "думаю", "думаешь", "отлично", "круто", "ладно", "вместе", "сначала"
-    )
-
-    private val EN_WORDS = listOf(
-        "hello", "hi", "thanks", "thank", "please", "yes", "okay", "today", "tomorrow",
-        "yesterday", "now", "because", "maybe", "should", "would", "could", "really", "great",
-        "good", "morning", "night", "sorry", "message", "phone", "keyboard", "application",
-        "photo", "video", "work", "home", "friend", "people", "time", "later", "also", "already",
-        "always", "never", "about", "after", "again", "before", "between", "which", "where",
-        "what", "when", "why", "how", "who", "want", "need", "know", "think", "going", "doing",
-        "something", "nothing", "everything", "anything", "thing", "things", "example",
-        "actually", "probably", "sure", "right", "well", "love", "like", "looking", "forward",
-        "meeting", "tonight", "weekend", "family", "school", "money", "news", "don't", "can't",
-        "I'm", "I'll", "I've", "that's", "it's", "let's", "thank you", "see you"
-    )
-
-    /** Возвращает исправление для слова или null, если исправлять нечего. */
-    fun correction(word: String): String? {
-        val fix = FIXES[word.lowercase()] ?: return null
-        if (fix.equals(word, ignoreCase = true)) return null
-        return if (word[0].isUpperCase()) fix.replaceFirstChar { it.uppercase() } else fix
+    /** Вызвать один раз при старте сервиса: задаёт контекст для загрузки словарей. */
+    fun init(ctx: Context) {
+        appCtx = ctx.applicationContext
     }
 
-    /** Подсказки для начатого слова (не меньше двух букв). */
-    fun suggest(prefix: String, russian: Boolean): List<String> {
+    /** Исправление для слова или null, если исправлять не надо. */
+    fun correction(word: String): String? {
+        val lw = word.lowercase()
+        FIXES[lw]?.let { return matchCase(word, it) }
+        if (lw.length < 3 || lw.contains('\'')) return null
+        val dict = if (isRussian(lw)) ru else en
+        if (dict.rank.containsKey(lw)) return null
+        val maxDist = if (lw.length <= 6) 1 else 2
+        val best = nearest(lw, dict, maxDist, 1).firstOrNull() ?: return null
+        return matchCase(word, best)
+    }
+
+    /**
+     * Варианты для строки над клавишами: сначала слова с таким началом (по частоте),
+     * а если их мало, похожие слова, чтобы поймать опечатку.
+     */
+    fun suggestions(prefix: String, russian: Boolean, limit: Int = 3): List<String> {
         val p = prefix.lowercase()
         if (p.length < 2) return emptyList()
-        val list = if (russian) RU_WORDS else EN_WORDS
-        return list.filter { it.startsWith(p) && it != p }.distinct().take(3)
+        val dict = if (russian) ru else en
+        val out = LinkedHashSet<String>()
+        for (w in dict.words) {
+            if (out.size >= limit) break
+            if (w.startsWith(p) && w != p) out.add(w)
+        }
+        if (out.size < limit && p.length >= 3) {
+            for (w in nearest(p, dict, 2, limit)) {
+                if (out.size >= limit) break
+                if (w != p) out.add(w)
+            }
+        }
+        return out.toList()
     }
 
     /** Подгоняет регистр подсказки под начало набранного слова. */
     fun applyCase(prefix: String, word: String): String =
         if (prefix.isNotEmpty() && prefix[0].isUpperCase()) word.replaceFirstChar { it.uppercase() } else word
+
+    private fun matchCase(orig: String, fix: String): String =
+        if (orig.isNotEmpty() && orig[0].isUpperCase()) fix.replaceFirstChar { it.uppercase() } else fix
+
+    private fun isRussian(w: String) = w.any { it in 'а'..'я' || it == 'ё' }
+
+    /** Ближайшие слова по расстоянию, при равенстве — по частоте. */
+    private fun nearest(w: String, dict: Dict, maxDist: Int, count: Int): List<String> {
+        val found = ArrayList<Triple<Int, Int, String>>()
+        for ((rank, c) in dict.words.withIndex()) {
+            if (c.length < 2 || abs(c.length - w.length) > maxDist) continue
+            val d = distance(w, c, maxDist)
+            if (d in 1..maxDist) found.add(Triple(d, rank, c))
+        }
+        found.sortWith(compareBy<Triple<Int, Int, String>>({ it.first }, { it.second }))
+        return found.take(count).map { it.third }
+    }
+
+    /** Расстояние Дамерау–Левенштейна (с перестановкой соседних букв), с ранним выходом. */
+    private fun distance(a: String, b: String, max: Int): Int {
+        val n = a.length
+        val m = b.length
+        if (abs(n - m) > max) return max + 1
+        val d = Array(n + 1) { IntArray(m + 1) }
+        for (i in 0..n) d[i][0] = i
+        for (j in 0..m) d[0][j] = j
+        for (i in 1..n) {
+            var rowMin = Int.MAX_VALUE
+            for (j in 1..m) {
+                val cost = if (a[i - 1] == b[j - 1]) 0 else 1
+                var v = min(min(d[i - 1][j] + 1, d[i][j - 1] + 1), d[i - 1][j - 1] + cost)
+                if (i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1]) {
+                    v = min(v, d[i - 2][j - 2] + 1)
+                }
+                d[i][j] = v
+                if (v < rowMin) rowMin = v
+            }
+            if (rowMin > max) return max + 1
+        }
+        return d[n][m]
+    }
+
+    private fun load(resId: Int): Dict {
+        val ctx = checkNotNull(appCtx) { "Words.init() не вызван" }
+        val words = ctx.resources.openRawResource(resId).bufferedReader().useLines { lines ->
+            lines.map { it.trim() }.filter { it.isNotEmpty() }.toList()
+        }
+        val rank = HashMap<String, Int>(words.size * 2)
+        words.forEachIndexed { i, w -> rank.putIfAbsent(w, i) }
+        return Dict(words, rank)
+    }
 }

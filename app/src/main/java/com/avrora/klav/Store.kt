@@ -54,6 +54,10 @@ object Prefs {
     fun setBgOffset(ctx: Context, x: Float, y: Float) =
         file(ctx).edit().putFloat("bg_ox", x).putFloat("bg_oy", y).apply()
 
+    /** Размер букв на клавишах, 12..26 sp. */
+    fun keySp(ctx: Context) = i(ctx, "key_sp", 17)
+    fun setKeySp(ctx: Context, v: Int) = setI(ctx, "key_sp", v)
+
     /** Непрозрачность заливки клавиш, 0..100 процентов. 0 — полностью прозрачные. */
     fun keyAlpha(ctx: Context) = i(ctx, "key_alpha", 20)
     fun setKeyAlpha(ctx: Context, v: Int) = setI(ctx, "key_alpha", v)
@@ -119,6 +123,36 @@ object Appearance {
             Prefs.bgOy(ctx),
             Prefs.bgZoom(ctx) / 100f
         )
+    }
+
+    /**
+     * Цвет системной нижней панели: средний цвет нижней части картинки
+     * с учётом затемнения, чтобы полоса совпадала с фоном.
+     */
+    fun navColor(ctx: Context, uri: String?, dim: Int): Int {
+        val bmp = bitmap(ctx, uri) ?: return Colors.BG
+        val startY = (bmp.height * 0.92f).toInt().coerceIn(0, bmp.height - 1)
+        var r = 0L
+        var g = 0L
+        var b = 0L
+        var n = 0L
+        var y = startY
+        while (y < bmp.height) {
+            var x = 0
+            while (x < bmp.width) {
+                val c = bmp.getPixel(x, y)
+                r += Color.red(c)
+                g += Color.green(c)
+                b += Color.blue(c)
+                n++
+                x += 8
+            }
+            y += 8
+        }
+        if (n == 0L) return Colors.BG
+        val a = dim / 100f
+        fun mix(sum: Long, dark: Int): Int = ((sum / n) * (1 - a) + dark * a).toInt()
+        return Color.rgb(mix(r, 11), mix(g, 15), mix(b, 26))
     }
 
     /** Насколько картинку можно сдвинуть в каждую сторону, в пикселях. */

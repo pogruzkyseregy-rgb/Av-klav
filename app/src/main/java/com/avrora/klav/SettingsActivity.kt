@@ -174,7 +174,7 @@ class SettingsActivity : Activity() {
         text = label
         gravity = Gravity.CENTER
         setTextColor(TEXT)
-        textSize = 15f
+        textSize = Prefs.keySp(this@SettingsActivity).toFloat()
         background = GradientDrawable().apply {
             cornerRadius = dp(6).toFloat()
             setColor(Appearance.keyFill(alpha))
