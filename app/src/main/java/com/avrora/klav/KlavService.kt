@@ -2,24 +2,20 @@ package com.avrora.klav
 
 import android.content.ClipboardManager
 import android.content.Context
-import android.graphics.Bitmap
-import android.graphics.BitmapFactory
-import android.graphics.Canvas
-import android.graphics.Color
-import android.graphics.ColorFilter
-import android.graphics.Paint
-import android.graphics.PixelFormat
-import android.graphics.Rect
-import android.graphics.RectF
-import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.inputmethodservice.InputMethodService
-import android.net.Uri
+import android.media.AudioManager
+import android.media.ToneGenerator
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
 import android.text.TextUtils
 import android.util.TypedValue
 import android.view.Gravity
+import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
@@ -27,35 +23,55 @@ import android.view.inputmethod.EditorInfo
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import android.widget.SeekBar
+import android.widget.Switch
 import android.widget.TextView
 import com.avrora.klav.Colors.BG
 import com.avrora.klav.Colors.CYAN
-import com.avrora.klav.Colors.KEY
 import com.avrora.klav.Colors.MUTED
 import com.avrora.klav.Colors.PINK
 import com.avrora.klav.Colors.STROKE
 import com.avrora.klav.Colors.TEXT
+import kotlin.math.abs
 
 class KlavService : InputMethodService() {
 
     private enum class Mode { RU, EN, SYM }
+    private enum class Panel { KEYS, CLIPS, SETTINGS }
 
     private val handler = Handler(Looper.getMainLooper())
     private var mode = Mode.RU
     private var lastLetterMode = Mode.RU
     private var shift = false
-    private var showingClips = false
+    private var panel = Panel.KEYS
+    private var tone: ToneGenerator? = null
 
-    private var cachedUri: String? = null
-    private var cachedBg: Bitmap? = null
+    // Состояние длинного нажатия пробела (курсор).
+    private var spaceX = 0f
+    private var spaceLong = false
+    private val spaceLongRunnable = Runnable {
+        spaceLong = true
+        buzz()
+    }
 
     private lateinit var rootView: FrameLayout
     private lateinit var keysArea: LinearLayout
     private lateinit var clipScroll: ScrollView
     private lateinit var clipList: LinearLayout
+    private lateinit var settingsScroll: ScrollView
     private lateinit var clipButton: TextView
+    private lateinit var settingsButton: TextView
 
     private val clipboard by lazy { getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager }
+
+    private val vibrator: Vibrator by lazy {
+        if (Build.VERSION.SDK_INT >= 31) {
+            (getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager).defaultVibrator
+        } else {
+            @Suppress("DEPRECATION")
+            getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
+        }
+    }
 
     /** Сохраняет каждое новое скопированное значение в историю буфера. */
     private val clipListener = ClipboardManager.OnPrimaryClipChangedListener {
@@ -66,7 +82,7 @@ class KlavService : InputMethodService() {
             ?.toString()
         if (!text.isNullOrBlank()) {
             ClipStore.add(this, text)
-            if (showingClips) refreshClips()
+            if (panel == Panel.CLIPS) refreshClips()
         }
     }
 
@@ -78,9 +94,10 @@ class KlavService : InputMethodService() {
         }
     }
 
-    private val deleteTouch = View.OnTouchListener { _, e ->
+    private val deleteTouch = View.OnTouchListener { v, e ->
         when (e.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
+                feedback(v)
                 deleteOne()
                 handler.postDelayed(repeatDelete, 400)
                 true
@@ -93,14 +110,54 @@ class KlavService : InputMethodService() {
         }
     }
 
+    /**
+     * Пробел: короткое нажатие печатает пробел, удержание и движение пальца
+     * двигают курсор по тексту.
+     */
+    private val spaceTouch = View.OnTouchListener { v, e ->
+        when (e.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                spaceX = e.x
+                spaceLong = false
+                feedback(v)
+                handler.postDelayed(spaceLongRunnable, 350)
+            }
+            MotionEvent.ACTION_MOVE -> {
+                if (spaceLong) {
+                    val step = dp(14).toFloat()
+                    val n = ((e.x - spaceX) / step).toInt()
+                    if (n != 0) {
+                        val code = if (n > 0) KeyEvent.KEYCODE_DPAD_RIGHT else KeyEvent.KEYCODE_DPAD_LEFT
+                        repeat(abs(n)) { sendDownUpKeyEvents(code) }
+                        spaceX += n * step
+                    }
+                }
+            }
+            MotionEvent.ACTION_UP -> {
+                handler.removeCallbacks(spaceLongRunnable)
+                if (!spaceLong) commit(" ")
+            }
+            MotionEvent.ACTION_CANCEL -> handler.removeCallbacks(spaceLongRunnable)
+            else -> return@OnTouchListener false
+        }
+        true
+    }
+
     override fun onCreate() {
         super.onCreate()
         clipboard.addPrimaryClipChangedListener(clipListener)
+        tone = try {
+            ToneGenerator(AudioManager.STREAM_SYSTEM, 35)
+        } catch (e: RuntimeException) {
+            null
+        }
     }
 
     override fun onDestroy() {
         clipboard.removePrimaryClipChangedListener(clipListener)
         handler.removeCallbacksAndMessages(null)
+        tone?.release()
+        tone = null
         super.onDestroy()
     }
 
@@ -122,9 +179,16 @@ class KlavService : InputMethodService() {
             visibility = View.GONE
             addView(clipList)
         }
-        column.addView(clipScroll, LinearLayout.LayoutParams(MATCH, dp(220)))
+        column.addView(clipScroll, LinearLayout.LayoutParams(MATCH, dp(230)))
+
+        settingsScroll = ScrollView(this).apply {
+            visibility = View.GONE
+            addView(buildSettingsPanel())
+        }
+        column.addView(settingsScroll, LinearLayout.LayoutParams(MATCH, dp(230)))
 
         root.addView(column, FrameLayout.LayoutParams(MATCH, WRAP))
+        applyAppearance()
         rebuildKeys()
         return root
     }
@@ -133,7 +197,7 @@ class KlavService : InputMethodService() {
         super.onStartInputView(info, restarting)
         if (!::rootView.isInitialized) return
         applyAppearance()
-        showClips(false)
+        showPanel(Panel.KEYS)
     }
 
     override fun onEvaluateFullscreenMode(): Boolean = false
@@ -141,36 +205,10 @@ class KlavService : InputMethodService() {
     // ---------- Внешний вид ----------
 
     private fun applyAppearance() {
-        val prefs = ClipStore.prefs(this)
-        val bmp = loadBackground(prefs.getString(ClipStore.PREF_BG, null))
-        val dim = prefs.getInt(ClipStore.PREF_DIM, 55)
-        if (bmp != null) {
-            rootView.background = CropDrawable(bmp, Color.argb(dim * 255 / 100, 11, 15, 26))
-        } else {
-            rootView.setBackgroundColor(BG)
-        }
+        rootView.background = Appearance.backgroundDrawable(this, Prefs.bgUri(this), Prefs.dim(this))
     }
 
-    private fun loadBackground(uriString: String?): Bitmap? {
-        if (uriString == null) {
-            cachedUri = null
-            cachedBg = null
-            return null
-        }
-        if (uriString == cachedUri) return cachedBg
-        val bmp = try {
-            contentResolver.openInputStream(Uri.parse(uriString))?.use { stream ->
-                BitmapFactory.decodeStream(stream, null, BitmapFactory.Options().apply { inSampleSize = 2 })
-            }
-        } catch (e: Exception) {
-            null
-        }
-        cachedUri = uriString
-        cachedBg = bmp
-        return bmp
-    }
-
-    // ---------- Верхняя панель и буфер ----------
+    // ---------- Верхняя панель ----------
 
     private fun buildTopBar(): View {
         val bar = LinearLayout(this).apply {
@@ -187,26 +225,103 @@ class KlavService : InputMethodService() {
             },
             LinearLayout.LayoutParams(0, WRAP, 1f)
         )
-        clipButton = TextView(this).apply {
-            text = "📋 Буфер"
-            gravity = Gravity.CENTER
-            setTextColor(TEXT)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-            setPadding(dp(12), dp(6), dp(12), dp(6))
-            background = roundRect(KEY, CYAN)
-            setOnClickListener { showClips(!showingClips) }
-        }
+        clipButton = chip("📋 Буфер") { togglePanel(Panel.CLIPS) }
+        settingsButton = chip("⚙") { togglePanel(Panel.SETTINGS) }
         bar.addView(clipButton, LinearLayout.LayoutParams(WRAP, WRAP))
+        bar.addView(settingsButton, LinearLayout.LayoutParams(WRAP, WRAP).apply { setMargins(dp(6), 0, 0, 0) })
         return bar
     }
 
-    private fun showClips(show: Boolean) {
-        showingClips = show
-        clipScroll.visibility = if (show) View.VISIBLE else View.GONE
-        keysArea.visibility = if (show) View.GONE else View.VISIBLE
-        clipButton.text = if (show) "⌨ Клавиши" else "📋 Буфер"
-        if (show) refreshClips()
+    private fun chip(label: String, onTap: () -> Unit): TextView = TextView(this).apply {
+        text = label
+        gravity = Gravity.CENTER
+        setTextColor(TEXT)
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+        setPadding(dp(12), dp(6), dp(12), dp(6))
+        background = roundRect(Appearance.keyFill(Prefs.keyAlpha(this@KlavService)), CYAN)
+        setOnClickListener { onTap() }
     }
+
+    private fun togglePanel(p: Panel) = showPanel(if (panel == p) Panel.KEYS else p)
+
+    private fun showPanel(p: Panel) {
+        panel = p
+        keysArea.visibility = if (p == Panel.KEYS) View.VISIBLE else View.GONE
+        clipScroll.visibility = if (p == Panel.CLIPS) View.VISIBLE else View.GONE
+        settingsScroll.visibility = if (p == Panel.SETTINGS) View.VISIBLE else View.GONE
+        clipButton.setTextColor(if (p == Panel.CLIPS) CYAN else TEXT)
+        settingsButton.setTextColor(if (p == Panel.SETTINGS) CYAN else TEXT)
+        if (p == Panel.CLIPS) refreshClips()
+    }
+
+    // ---------- Панель настроек визуала ----------
+
+    private fun buildSettingsPanel(): LinearLayout {
+        val col = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), dp(6), dp(12), dp(6))
+        }
+        col.addView(hint("Визуал"))
+        col.addView(slider("Затемнение фона", 90, Prefs.dim(this)) {
+            Prefs.setDim(this, it)
+            applyAppearance()
+        })
+        col.addView(slider("Прозрачность клавиш", 100, Prefs.keyAlpha(this)) {
+            Prefs.setKeyAlpha(this, it)
+            rebuildKeys()
+        })
+        col.addView(hint("Отклик"))
+        col.addView(toggle("Звук при нажатии", Prefs.sound(this)) { Prefs.setSound(this, it) })
+        col.addView(toggle("Вибрация", Prefs.haptic(this)) { Prefs.setHaptic(this, it) })
+        col.addView(toggle("Глитч при нажатии", Prefs.glitch(this)) { Prefs.setGlitch(this, it) })
+        col.addView(toggle("Заглавная после точки", Prefs.autoCap(this)) { Prefs.setAutoCap(this, it) })
+        col.addView(chip("Готово") { showPanel(Panel.KEYS) }.apply {
+            layoutParams = LinearLayout.LayoutParams(WRAP, WRAP).apply { setMargins(0, dp(8), 0, 0) }
+        })
+        return col
+    }
+
+    private fun slider(title: String, maxValue: Int, value: Int, onChange: (Int) -> Unit): LinearLayout {
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, dp(4), 0, dp(4))
+        }
+        val label = hint("$title: $value%")
+        box.addView(label)
+        box.addView(SeekBar(this).apply {
+            max = maxValue
+            progress = value
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar?, p: Int, fromUser: Boolean) {
+                    label.text = "$title: $p%"
+                    if (fromUser) onChange(p)
+                }
+
+                override fun onStartTrackingTouch(sb: SeekBar?) {}
+
+                override fun onStopTrackingTouch(sb: SeekBar?) {}
+            })
+        })
+        return box
+    }
+
+    private fun toggle(title: String, checked: Boolean, onChange: (Boolean) -> Unit): Switch =
+        Switch(this).apply {
+            text = title
+            setTextColor(TEXT)
+            isChecked = checked
+            setPadding(0, dp(6), 0, dp(6))
+            setOnCheckedChangeListener { _, c -> onChange(c) }
+        }
+
+    private fun hint(s: String): TextView = TextView(this).apply {
+        text = s
+        setTextColor(MUTED)
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+        setPadding(0, dp(6), 0, dp(2))
+    }
+
+    // ---------- Буфер обмена ----------
 
     private fun refreshClips() {
         clipList.removeAllViews()
@@ -223,7 +338,7 @@ class KlavService : InputMethodService() {
             val item = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                background = roundRect(KEY, if (clip.pinned) PINK else STROKE)
+                background = roundRect(Appearance.keyFill(Prefs.keyAlpha(this@KlavService)), if (clip.pinned) PINK else STROKE)
                 layoutParams = LinearLayout.LayoutParams(MATCH, WRAP).apply {
                     setMargins(0, dp(3), 0, dp(3))
                 }
@@ -237,7 +352,7 @@ class KlavService : InputMethodService() {
                     setPadding(dp(10), dp(8), dp(6), dp(8))
                     setOnClickListener {
                         commit(clip.text)
-                        showClips(false)
+                        showPanel(Panel.KEYS)
                     }
                 },
                 LinearLayout.LayoutParams(0, WRAP, 1f)
@@ -303,7 +418,10 @@ class KlavService : InputMethodService() {
         })
         line.addView(key(if (letterTarget == Mode.RU) "RU" else "EN", 1.2f) { setMode(letterTarget) })
         line.addView(key(",", 0.8f) { commit(",") })
-        line.addView(key(if (lastLetterMode == Mode.RU) "пробел" else "space", 3.6f) { commit(" ") })
+        line.addView(
+            key(if (lastLetterMode == Mode.RU) "пробел" else "space", 3.6f) { }
+                .also { it.setOnTouchListener(spaceTouch) }
+        )
         line.addView(key(".", 0.8f) { commit(".") })
         line.addView(key("⏎", 1.6f, active = true) { enter() })
         return line
@@ -320,9 +438,16 @@ class KlavService : InputMethodService() {
             gravity = Gravity.CENTER
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 17f)
             setTextColor(if (active) BG else TEXT)
-            background = roundRect(if (active) CYAN else KEY, if (active) CYAN else STROKE)
+            background = roundRect(
+                if (active) CYAN else Appearance.keyFill(Prefs.keyAlpha(this@KlavService)),
+                if (active) CYAN else STROKE
+            )
             layoutParams = LinearLayout.LayoutParams(0, dp(46), weight).apply {
                 setMargins(dp(2), dp(3), dp(2), dp(3))
+            }
+            setOnTouchListener { v, e ->
+                if (e.actionMasked == MotionEvent.ACTION_DOWN) feedback(v)
+                false
             }
             setOnClickListener { onTap() }
         }
@@ -331,6 +456,35 @@ class KlavService : InputMethodService() {
         cornerRadius = dp(8).toFloat()
         setColor(fill)
         setStroke(dp(1), stroke)
+    }
+
+    // ---------- Отклик: звук, вибрация, глитч ----------
+
+    private fun feedback(v: View) {
+        if (Prefs.sound(this)) tone?.startTone(ToneGenerator.TONE_PROP_BEEP2, 10)
+        buzz()
+        glitch(v)
+    }
+
+    private fun buzz() {
+        if (!Prefs.haptic(this)) return
+        if (Build.VERSION.SDK_INT >= 26) {
+            vibrator.vibrate(VibrationEffect.createOneShot(12, VibrationEffect.DEFAULT_AMPLITUDE))
+        } else {
+            @Suppress("DEPRECATION")
+            vibrator.vibrate(12L)
+        }
+    }
+
+    /** Короткий сдвиг клавиши и розовая тень на время нажатия. */
+    private fun glitch(v: View) {
+        if (!Prefs.glitch(this)) return
+        v.animate().cancel()
+        v.translationX = dp(2).toFloat()
+        v.animate().translationX(0f).setDuration(120).start()
+        val tv = v as? TextView ?: return
+        tv.setShadowLayer(dp(2).toFloat(), -dp(2).toFloat(), 0f, PINK)
+        tv.postDelayed({ tv.setShadowLayer(0f, 0f, 0f, 0) }, 120)
     }
 
     // ---------- Действия ----------
@@ -348,11 +502,22 @@ class KlavService : InputMethodService() {
     }
 
     private fun onChar(c: String) {
-        commit(if (shift) c.uppercase() else c)
+        val upper = shift || autoCapNow()
+        commit(if (upper) c.uppercase() else c)
         if (shift) {
             shift = false
             rebuildKeys()
         }
+    }
+
+    /** Заглавная буква нужна в начале текста и после точки (или ! ?) с пробелом. */
+    private fun autoCapNow(): Boolean {
+        if (!Prefs.autoCap(this)) return false
+        val before = currentInputConnection?.getTextBeforeCursor(3, 0)?.toString() ?: return false
+        if (before.isEmpty() || before.endsWith("\n")) return true
+        if (!before.endsWith(" ")) return false
+        val trimmed = before.trimEnd()
+        return trimmed.isNotEmpty() && trimmed.last() in ".!?"
     }
 
     private fun commit(s: String) {
@@ -388,31 +553,4 @@ class KlavService : InputMethodService() {
         private val EN_ROWS = listOf("qwertyuiop", "asdfghjkl", "zxcvbnm")
         private val SYM_ROWS = listOf("1234567890", "@#\$_&-+()/", "*\"':;!?")
     }
-}
-
-/** Рисует фоновую картинку с центрированием (как CENTER_CROP) и затемнением поверх. */
-private class CropDrawable(private val bmp: Bitmap, dimColor: Int) : Drawable() {
-    private val paint = Paint(Paint.FILTER_BITMAP_FLAG)
-    private val dimPaint = Paint().apply { color = dimColor }
-    private val src = Rect(0, 0, bmp.width, bmp.height)
-    private val dst = RectF()
-
-    override fun draw(canvas: Canvas) {
-        val b = bounds
-        if (b.isEmpty) return
-        val scale = maxOf(b.width().toFloat() / bmp.width, b.height().toFloat() / bmp.height)
-        val w = bmp.width * scale
-        val h = bmp.height * scale
-        val left = b.left + (b.width() - w) / 2f
-        val top = b.top + (b.height() - h) / 2f
-        dst.set(left, top, left + w, top + h)
-        canvas.drawBitmap(bmp, src, dst, paint)
-        canvas.drawRect(b, dimPaint)
-    }
-
-    override fun setAlpha(alpha: Int) {}
-
-    override fun setColorFilter(colorFilter: ColorFilter?) {}
-
-    override fun getOpacity(): Int = PixelFormat.TRANSLUCENT
 }

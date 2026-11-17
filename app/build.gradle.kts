@@ -3,6 +3,11 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+// Постоянный ключ подписи: APK с одним ключом ставятся поверх друг друга как обновления.
+// Ключ лежит в keystore/avrora-klav.jks в корне репозитория.
+val keystoreFile = rootProject.file("keystore/avrora-klav.jks")
+val keyPass = "avrora-klav-key"
+
 android {
     namespace = "com.avrora.klav"
     compileSdk = 34
@@ -11,13 +16,27 @@ android {
         applicationId = "com.avrora.klav"
         minSdk = 24
         targetSdk = 34
-        versionCode = 1
-        versionName = "0.1.0"
+        // При каждом обновлении увеличивай versionCode, иначе Android не поставит APK поверх.
+        versionCode = 2
+        versionName = "0.2.0"
+    }
+
+    signingConfigs {
+        create("avrora") {
+            storeFile = keystoreFile
+            storePassword = keyPass
+            keyAlias = "avrora"
+            keyPassword = keyPass
+        }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("avrora")
+        }
+        debug {
+            signingConfig = signingConfigs.getByName("avrora")
         }
     }
 
