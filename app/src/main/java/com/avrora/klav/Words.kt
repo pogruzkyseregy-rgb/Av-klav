@@ -22,6 +22,12 @@ internal object Words {
     private const val PERSONAL_KEY = "personal_words"
     private const val PERSONAL_MAX = 500
 
+    /** Автозамена только на частые слова: первые 12 000 в списке. */
+    private const val COMMON_RANK = 12000
+
+    /** Насколько лучший вариант должен быть лучше второго, чтобы заменить слово. */
+    private const val MARGIN = 0.15
+
     private val RU_KB = listOf("йцукенгшщзх", "фывапролджэ", "ячсмитьбю")
     private val EN_KB = listOf("qwertyuiop", "asdfghjkl", "zxcvbnm")
 
@@ -76,14 +82,25 @@ internal object Words {
         Prefs.file(ctx).edit().putStringSet(PERSONAL_KEY, personal.toSet()).apply()
     }
 
-    /** Исправление для слова или null, если исправлять не надо. */
-    fun correction(word: String): String? {
+    /**
+     * Исправление для слова или null, если исправлять не надо.
+     * Строго: только частые слова, только если лучший вариант явно лучше второго,
+     * имена и аббревиатуры не трогаем.
+     */
+    fun correction(word: String, sentenceStart: Boolean = true): String? {
         val lw = word.lowercase()
         FIXES[lw]?.let { return matchCase(word, it) }
-        if (lw.length < 4 || lw.contains('\'') || isKnown(lw)) return null
+        if (lw.length < 4 || lw.contains('\'') || lw.any { it.isDigit() }) return null
+        if (word.drop(1).any { it.isUpperCase() }) return null
+        if (word[0].isUpperCase() && !sentenceStart) return null
+        if (isKnown(lw)) return null
+        val dict = dictFor(lw)
+        if (dict === ru) yoIndex[lw]?.let { return matchCase(word, it) }
         val max = if (lw.length <= 5) 1.0 else 1.6
-        val best = fuzzy(lw, dictFor(lw), max, 1).firstOrNull() ?: return null
-        return matchCase(word, best)
+        val ranked = fuzzy(lw, dict, max, 2, COMMON_RANK)
+        if (ranked.isEmpty()) return null
+        if (ranked.size > 1 && ranked[1].score - ranked[0].score < MARGIN) return null
+        return matchCase(word, ranked[0].word)
     }
 
     /** Строка подсказок для набранного слова. */
@@ -102,7 +119,7 @@ internal object Words {
             }
         }
         if (out.size < 2 && p.length >= 3) {
-            fuzzy(p, dict, 1.6, 2).forEach { out.add(it) }
+            fuzzy(p, dict, 1.6, 2).forEach { out.add(it.word) }
         }
         val list = out.filter { it != p && it.isNotEmpty() }.take(2).map { applyCase(prefix, it) }
         return Bar(prefix, list)
@@ -119,18 +136,28 @@ internal object Words {
     private fun matchCase(orig: String, fix: String): String =
         if (orig.isNotEmpty() && orig[0].isUpperCase()) fix.replaceFirstChar { it.uppercase() } else fix
 
+    private class Scored(val score: Double, val word: String)
+
     /** Ближайшие слова по взвешенному расстоянию; при равенстве выигрывает частотное слово. */
-    private fun fuzzy(w: String, dict: Dict, max: Double, count: Int): List<String> {
-        val found = ArrayList<Pair<Double, String>>()
+    private fun fuzzy(w: String, dict: Dict, max: Double, count: Int, maxRank: Int = Int.MAX_VALUE): List<Scored> {
+        val found = ArrayList<Scored>()
         val n = dict.words.size.toDouble()
         for ((rank, c) in dict.words.withIndex()) {
+            if (rank >= maxRank) break
             if (c.length < 2 || abs(c.length - w.length) > max) continue
             val d = weightedDistance(w, c, max)
             if (d == 0.0 || d > max) continue
-            found.add(Pair(d + 0.2 * rank / n, c))
+            found.add(Scored(d + 0.2 * rank / n, c))
         }
-        found.sortBy { it.first }
-        return found.take(count).map { it.second }
+        found.sortBy { it.score }
+        return found.take(count)
+    }
+
+    /** Ё в слове и слова с ё: «еще» → «ещё». Ключ — слово без ё. */
+    private val yoIndex: Map<String, String> by lazy {
+        val m = HashMap<String, String>()
+        for (w in ru.words) if (w.contains('ё')) m.putIfAbsent(w.replace('ё', 'е'), w)
+        m
     }
 
     private fun cost(a: Char, b: Char): Double = when {

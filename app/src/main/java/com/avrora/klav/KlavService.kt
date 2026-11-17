@@ -40,7 +40,10 @@ import kotlin.random.Random
 class KlavService : InputMethodService() {
 
     private enum class Mode { RU, EN, SYM }
-    private enum class Panel { KEYS, CLIPS, SETTINGS }
+    private enum class Panel { KEYS, CLIPS, SETTINGS, PUNCT }
+
+    /** Подсказка при касании к слову, которое исправила автозамена: можно вернуть исходное. */
+    private class Hint(val fixed: String, val original: String, val beforeLen: Int, val afterLen: Int)
 
     private val handler = Handler(Looper.getMainLooper())
     private var mode = Mode.RU
@@ -52,6 +55,11 @@ class KlavService : InputMethodService() {
 
     /** Последняя автозамена пробелом: (что набрал, на что заменили). Нужна для отмены Backspace. */
     private var lastAuto: Pair<String, String>? = null
+
+    /** Исправления этой сессии: исправленное слово (в нижнем регистре) → исходное. */
+    private val recentFixes = LinkedHashMap<String, String>()
+    private var activeHint: Hint? = null
+    private var lastEditAt = 0L
 
     // Состояние длинного нажатия пробела (курсор).
     private var spaceX = 0f
@@ -75,6 +83,7 @@ class KlavService : InputMethodService() {
     private lateinit var clipScroll: ScrollView
     private lateinit var clipList: LinearLayout
     private lateinit var settingsScroll: ScrollView
+    private lateinit var punctScroll: ScrollView
     private lateinit var clipButton: TextView
     private lateinit var settingsButton: TextView
 
@@ -162,7 +171,6 @@ class KlavService : InputMethodService() {
     override fun onCreate() {
         super.onCreate()
         Words.init(this)
-        // Словари грузятся в фоне, чтобы первое нажатие не тормозило.
         Thread { Words.warm() }.start()
         clipboard.addPrimaryClipChangedListener(clipListener)
         tone = try {
@@ -212,6 +220,12 @@ class KlavService : InputMethodService() {
         }
         column.addView(settingsScroll, LinearLayout.LayoutParams(MATCH, dp(240)))
 
+        punctScroll = ScrollView(this).apply {
+            visibility = View.GONE
+            addView(buildPunctPanel())
+        }
+        column.addView(punctScroll, LinearLayout.LayoutParams(MATCH, dp(240)))
+
         root.addView(column, FrameLayout.LayoutParams(MATCH, WRAP))
         applyAppearance()
         rebuildKeys()
@@ -222,6 +236,7 @@ class KlavService : InputMethodService() {
         super.onStartInputView(info, restarting)
         if (!::rootView.isInitialized) return
         applyAppearance()
+        activeHint = null
         showPanel(Panel.KEYS)
         scheduleIdle()
     }
@@ -232,6 +247,35 @@ class KlavService : InputMethodService() {
     }
 
     override fun onEvaluateFullscreenMode(): Boolean = false
+
+    /**
+     * Курсор переехал (например, пользователь тапнул по тексту). Если это слово исправила
+     * автозамена, в строке подсказок появится исходное слово.
+     */
+    override fun onUpdateSelection(
+        oldSelStart: Int,
+        oldSelEnd: Int,
+        newSelStart: Int,
+        newSelEnd: Int,
+        candidatesStart: Int,
+        candidatesEnd: Int
+    ) {
+        super.onUpdateSelection(oldSelStart, oldSelEnd, newSelStart, newSelEnd, candidatesStart, candidatesEnd)
+        if (!::suggestChips.isInitialized) return
+        activeHint = null
+        val ic = currentInputConnection
+        val selfEdit = System.currentTimeMillis() - lastEditAt < 400
+        if (ic != null && newSelStart == newSelEnd && !selfEdit && recentFixes.isNotEmpty()) {
+            val before = ic.getTextBeforeCursor(40, 0)?.toString() ?: ""
+            val after = ic.getTextAfterCursor(40, 0)?.toString() ?: ""
+            val bw = before.takeLastWhile { it.isLetter() }
+            val aw = after.takeWhile { it.isLetter() }
+            val word = bw + aw
+            val orig = if (word.isNotEmpty()) recentFixes[word.lowercase()] else null
+            if (orig != null && orig != word) activeHint = Hint(word, orig, bw.length, aw.length)
+        }
+        updateSuggestions()
+    }
 
     // ---------- Внешний вид ----------
 
@@ -295,10 +339,37 @@ class KlavService : InputMethodService() {
         keysArea.visibility = if (p == Panel.KEYS) View.VISIBLE else View.GONE
         clipScroll.visibility = if (p == Panel.CLIPS) View.VISIBLE else View.GONE
         settingsScroll.visibility = if (p == Panel.SETTINGS) View.VISIBLE else View.GONE
+        punctScroll.visibility = if (p == Panel.PUNCT) View.VISIBLE else View.GONE
         clipButton.setTextColor(if (p == Panel.CLIPS) CYAN else TEXT)
         settingsButton.setTextColor(if (p == Panel.SETTINGS) CYAN else TEXT)
         if (p == Panel.CLIPS) refreshClips()
         updateSuggestions()
+    }
+
+    // ---------- Панель знаков препинания (долгое нажатие на точку) ----------
+
+    private fun buildPunctPanel(): LinearLayout {
+        val col = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(6), dp(6), dp(6), dp(6))
+        }
+        col.addView(hint("Знаки препинания"))
+        PUNCT_MARKS.chunked(6).forEach { chunk ->
+            val line = row()
+            chunk.forEach { m ->
+                line.addView(key(m, 1f) {
+                    punct(m)
+                    showPanel(Panel.KEYS)
+                })
+            }
+            // Добьём последнюю строку пустыми ячейками, чтобы кнопки были одного размера.
+            repeat(6 - chunk.size) { line.addView(key(" ", 1f) { }) }
+            col.addView(line)
+        }
+        col.addView(key("ABC", 1f, active = true) { showPanel(Panel.KEYS) }.apply {
+            layoutParams = LinearLayout.LayoutParams(MATCH, dp(46)).apply { setMargins(dp(2), dp(6), dp(2), dp(3)) }
+        })
+        return col
     }
 
     // ---------- Панель настроек визуала ----------
@@ -394,7 +465,7 @@ class KlavService : InputMethodService() {
         setPadding(0, dp(6), 0, dp(2))
     }
 
-    // ---------- Подсказки слов ----------
+    // ---------- Строка подсказок ----------
 
     private fun buildSuggestChip(): TextView = TextView(this).apply {
         gravity = Gravity.CENTER
@@ -407,14 +478,31 @@ class KlavService : InputMethodService() {
     }
 
     /**
-     * Три постоянные ячейки: слева набранное слово (тап оставляет его как есть),
-     * по центру и справа варианты (тап подставляет вариант). Пустые ячейки не меняют высоту строки.
+     * Три постоянные ячейки. Слева набранное слово, по центру главный вариант, справа второй.
+     * Если курсор стоит на слове, которое исправила автозамена, по центру — исходное слово.
+     * Пустые ячейки не меняют высоту строки.
      */
     private fun updateSuggestions() {
         if (!::suggestChips.isInitialized) return
         val visible = Prefs.suggest(this) && panel == Panel.KEYS
         suggestBar.visibility = if (visible) View.VISIBLE else View.INVISIBLE
         if (!visible) return
+
+        val h = activeHint
+        if (h != null) {
+            val typed = suggestChips[0]
+            typed.text = h.fixed
+            typed.setTextColor(MUTED)
+            typed.setOnClickListener(null)
+            val orig = suggestChips[1]
+            orig.text = h.original
+            orig.setTextColor(CYAN)
+            orig.setOnClickListener { applyHint(h) }
+            suggestChips[2].text = ""
+            suggestChips[2].setOnClickListener(null)
+            return
+        }
+
         val before = currentInputConnection?.getTextBeforeCursor(30, 0)?.toString() ?: ""
         val prefix = before.takeLastWhile { it.isLetter() }
         val bar = Words.bar(prefix, lastLetterMode == Mode.RU)
@@ -445,6 +533,16 @@ class KlavService : InputMethodService() {
     private fun acceptCandidate(prefix: String, word: String) {
         currentInputConnection?.deleteSurroundingText(prefix.length, 0)
         commit("$word ")
+    }
+
+    /** Возвращает исходное слово вместо исправленного и запоминает его. */
+    private fun applyHint(h: Hint) {
+        val ic = currentInputConnection ?: return
+        ic.deleteSurroundingText(h.beforeLen, h.afterLen)
+        recentFixes.remove(h.fixed.lowercase())
+        Words.learn(h.original)
+        activeHint = null
+        commit(h.original)
     }
 
     // ---------- Буфер обмена ----------
@@ -552,7 +650,8 @@ class KlavService : InputMethodService() {
             key(if (lastLetterMode == Mode.RU) "пробел" else "space", 3.6f) { }
                 .also { it.setOnTouchListener(spaceTouch) }
         )
-        line.addView(key(".", 0.8f) { punct(".") })
+        // Долгое нажатие на точку открывает панель знаков препинания.
+        line.addView(key(".", 0.8f, onLong = { showPanel(Panel.PUNCT) }) { punct(".") })
         line.addView(key("⏎", 1.6f, active = true) { enter() })
         return line
     }
@@ -562,7 +661,13 @@ class KlavService : InputMethodService() {
         layoutParams = LinearLayout.LayoutParams(MATCH, WRAP)
     }
 
-    private fun key(label: String, weight: Float = 1f, active: Boolean = false, onTap: () -> Unit): TextView =
+    private fun key(
+        label: String,
+        weight: Float = 1f,
+        active: Boolean = false,
+        onLong: (() -> Unit)? = null,
+        onTap: () -> Unit
+    ): TextView =
         TextView(this).apply {
             text = label
             gravity = Gravity.CENTER
@@ -580,6 +685,10 @@ class KlavService : InputMethodService() {
                 false
             }
             setOnClickListener { onTap() }
+            if (onLong != null) setOnLongClickListener {
+                onLong()
+                true
+            }
         }
 
     private fun roundRect(fill: Int, stroke: Int) = GradientDrawable().apply {
@@ -714,7 +823,7 @@ class KlavService : InputMethodService() {
     }
 
     /**
-     * Заменяет последнее слово, если оно похоже на опечатку из словаря.
+     * Заменяет последнее слово, если автозамена уверена.
      * Возвращает (что было набрано, на что заменили) или null.
      */
     private fun autoCorrectWord(): Pair<String, String>? {
@@ -723,14 +832,20 @@ class KlavService : InputMethodService() {
         val before = ic.getTextBeforeCursor(40, 0)?.toString() ?: return null
         val word = before.takeLastWhile { it.isLetter() || it == '\'' }
         if (word.isEmpty()) return null
-        val fix = Words.correction(word) ?: return null
+        val prior = before.dropLast(word.length).trimEnd(' ')
+        val sentenceStart = prior.isEmpty() || prior.last() in ".!?\n"
+        val fix = Words.correction(word, sentenceStart) ?: return null
         ic.deleteSurroundingText(word.length, 0)
         ic.commitText(fix, 1)
+        recentFixes[fix.lowercase()] = word
+        if (recentFixes.size > 100) recentFixes.remove(recentFixes.keys.first())
         return Pair(word, fix)
     }
 
     private fun commit(s: String) {
         lastAuto = null
+        activeHint = null
+        lastEditAt = System.currentTimeMillis()
         currentInputConnection?.commitText(s, 1)
         updateSuggestions()
     }
@@ -743,11 +858,14 @@ class KlavService : InputMethodService() {
         val ic = currentInputConnection ?: return
         val undo = lastAuto
         lastAuto = null
+        activeHint = null
+        lastEditAt = System.currentTimeMillis()
         if (undo != null) {
             val fixedWithSpace = undo.second + " "
             if (ic.getTextBeforeCursor(fixedWithSpace.length, 0)?.toString() == fixedWithSpace) {
                 ic.deleteSurroundingText(fixedWithSpace.length, 0)
                 ic.commitText(undo.first, 1)
+                recentFixes.remove(undo.second.lowercase())
                 Words.learn(undo.first)
                 updateSuggestions()
                 return
@@ -763,6 +881,7 @@ class KlavService : InputMethodService() {
         val info = currentInputEditorInfo
         val action = info.imeOptions and EditorInfo.IME_MASK_ACTION
         val noEnterAction = (info.imeOptions and EditorInfo.IME_FLAG_NO_ENTER_ACTION) != 0
+        lastEditAt = System.currentTimeMillis()
         if (noEnterAction || action == EditorInfo.IME_ACTION_NONE) {
             ic.commitText("\n", 1)
         } else {
@@ -786,5 +905,12 @@ class KlavService : InputMethodService() {
         private val RU_ROWS = listOf("йцукенгшщзх", "фывапролджэ", "ячсмитьбю")
         private val EN_ROWS = listOf("qwertyuiop", "asdfghjkl", "zxcvbnm")
         private val SYM_ROWS = listOf("1234567890", "@#\$_&-+()/", "*\"':;!?")
+
+        private val PUNCT_MARKS = listOf(
+            ".", ",", "!", "?", ":", ";",
+            "-", "—", "…", "\"", "'", "«",
+            "»", "(", ")", "@", "#", "/",
+            "&", "%", "*", "+", "=", "№"
+        )
     }
 }
