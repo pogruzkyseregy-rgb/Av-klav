@@ -50,6 +50,9 @@ class KlavService : InputMethodService() {
     private var tone: ToneGenerator? = null
     private var lastSpaceAt = 0L
 
+    /** Последняя автозамена пробелом: (что набрал, на что заменили). Нужна для отмены Backspace. */
+    private var lastAuto: Pair<String, String>? = null
+
     // Состояние длинного нажатия пробела (курсор).
     private var spaceX = 0f
     private var spaceLong = false
@@ -160,10 +163,7 @@ class KlavService : InputMethodService() {
         super.onCreate()
         Words.init(this)
         // Словари грузятся в фоне, чтобы первое нажатие не тормозило.
-        Thread {
-            Words.suggestions("пр", true)
-            Words.suggestions("th", false)
-        }.start()
+        Thread { Words.warm() }.start()
         clipboard.addPrimaryClipChangedListener(clipListener)
         tone = try {
             ToneGenerator(AudioManager.STREAM_SYSTEM, 35)
@@ -406,7 +406,10 @@ class KlavService : InputMethodService() {
         }
     }
 
-    /** Заполняет три постоянные ячейки; пустые ячейки не меняют высоту строки. */
+    /**
+     * Три постоянные ячейки: слева набранное слово (тап оставляет его как есть),
+     * по центру и справа варианты (тап подставляет вариант). Пустые ячейки не меняют высоту строки.
+     */
     private fun updateSuggestions() {
         if (!::suggestChips.isInitialized) return
         val visible = Prefs.suggest(this) && panel == Panel.KEYS
@@ -414,21 +417,32 @@ class KlavService : InputMethodService() {
         if (!visible) return
         val before = currentInputConnection?.getTextBeforeCursor(30, 0)?.toString() ?: ""
         val prefix = before.takeLastWhile { it.isLetter() }
-        val words = Words.suggestions(prefix, lastLetterMode == Mode.RU)
-        suggestChips.forEachIndexed { i, chip ->
-            val w = words.getOrNull(i)
-            if (w == null) {
-                chip.text = ""
-                chip.setOnClickListener(null)
-            } else {
-                val shown = Words.applyCase(prefix, w)
-                chip.text = shown
-                chip.setOnClickListener { acceptSuggestion(prefix, shown) }
-            }
+        val bar = Words.bar(prefix, lastLetterMode == Mode.RU)
+
+        val typed = suggestChips[0]
+        typed.text = bar.typed
+        typed.setTextColor(MUTED)
+        typed.setOnClickListener(if (prefix.isEmpty()) null else View.OnClickListener { acceptTyped(prefix) })
+
+        for (i in 1..2) {
+            val chip = suggestChips[i]
+            val cand = bar.candidates.getOrNull(i - 1)
+            chip.text = cand ?: ""
+            chip.setTextColor(if (i == 1) CYAN else TEXT)
+            chip.setOnClickListener(
+                if (cand == null) null else View.OnClickListener { acceptCandidate(prefix, cand) }
+            )
         }
     }
 
-    private fun acceptSuggestion(prefix: String, word: String) {
+    /** Оставляет набранное слово как есть и запоминает его. */
+    private fun acceptTyped(prefix: String) {
+        Words.learn(prefix)
+        currentInputConnection?.deleteSurroundingText(prefix.length, 0)
+        commit("$prefix ")
+    }
+
+    private fun acceptCandidate(prefix: String, word: String) {
         currentInputConnection?.deleteSurroundingText(prefix.length, 0)
         commit("$word ")
     }
@@ -692,31 +706,54 @@ class KlavService : InputMethodService() {
             commit(". ")
             lastSpaceAt = 0L
         } else {
-            autoCorrectWord()
+            val fixed = autoCorrectWord()
             commit(" ")
+            lastAuto = fixed
             lastSpaceAt = now
         }
     }
 
-    /** Заменяет последнее слово, если оно похоже на опечатку из словаря. */
-    private fun autoCorrectWord() {
-        if (!Prefs.autoCorrect(this)) return
-        val ic = currentInputConnection ?: return
-        val before = ic.getTextBeforeCursor(40, 0)?.toString() ?: return
+    /**
+     * Заменяет последнее слово, если оно похоже на опечатку из словаря.
+     * Возвращает (что было набрано, на что заменили) или null.
+     */
+    private fun autoCorrectWord(): Pair<String, String>? {
+        if (!Prefs.autoCorrect(this)) return null
+        val ic = currentInputConnection ?: return null
+        val before = ic.getTextBeforeCursor(40, 0)?.toString() ?: return null
         val word = before.takeLastWhile { it.isLetter() || it == '\'' }
-        if (word.isEmpty()) return
-        val fix = Words.correction(word) ?: return
+        if (word.isEmpty()) return null
+        val fix = Words.correction(word) ?: return null
         ic.deleteSurroundingText(word.length, 0)
         ic.commitText(fix, 1)
+        return Pair(word, fix)
     }
 
     private fun commit(s: String) {
+        lastAuto = null
         currentInputConnection?.commitText(s, 1)
         updateSuggestions()
     }
 
+    /**
+     * Backspace сразу после автозамены возвращает набранное слово и запоминает его:
+     * такое слово больше не будет исправляться.
+     */
     private fun deleteOne() {
-        currentInputConnection?.deleteSurroundingText(1, 0)
+        val ic = currentInputConnection ?: return
+        val undo = lastAuto
+        lastAuto = null
+        if (undo != null) {
+            val fixedWithSpace = undo.second + " "
+            if (ic.getTextBeforeCursor(fixedWithSpace.length, 0)?.toString() == fixedWithSpace) {
+                ic.deleteSurroundingText(fixedWithSpace.length, 0)
+                ic.commitText(undo.first, 1)
+                Words.learn(undo.first)
+                updateSuggestions()
+                return
+            }
+        }
+        ic.deleteSurroundingText(1, 0)
         updateSuggestions()
     }
 
