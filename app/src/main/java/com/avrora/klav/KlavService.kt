@@ -386,7 +386,7 @@ class KlavService : InputMethodService() {
 
         private val RU_ROWS = listOf("йцукенгшщзх", "фывапролджэ", "ячсмитьбю")
         private val EN_ROWS = listOf("qwertyuiop", "asdfghjkl", "zxcvbnm")
-        private val SYM_ROWS = listOf("1234567890", "@#$_&-+()/", "*\"':;!?")
+        private val SYM_ROWS = listOf("1234567890", "@#\$_&-+()/", "*\"':;!?")
     }
 }
 
