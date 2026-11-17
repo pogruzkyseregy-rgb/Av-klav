@@ -2,6 +2,7 @@ package com.avrora.klav
 
 import android.content.ClipboardManager
 import android.content.Context
+import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
 import android.inputmethodservice.InputMethodService
 import android.media.AudioManager
@@ -19,6 +20,7 @@ import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowInsets
 import android.view.inputmethod.EditorInfo
 import android.widget.FrameLayout
 import android.widget.LinearLayout
@@ -33,6 +35,7 @@ import com.avrora.klav.Colors.PINK
 import com.avrora.klav.Colors.STROKE
 import com.avrora.klav.Colors.TEXT
 import kotlin.math.abs
+import kotlin.random.Random
 
 class KlavService : InputMethodService() {
 
@@ -45,6 +48,7 @@ class KlavService : InputMethodService() {
     private var shift = false
     private var panel = Panel.KEYS
     private var tone: ToneGenerator? = null
+    private var lastSpaceAt = 0L
 
     // Состояние длинного нажатия пробела (курсор).
     private var spaceX = 0f
@@ -54,7 +58,15 @@ class KlavService : InputMethodService() {
         buzz()
     }
 
+    // Idle-анимация: клавиатура глитчит, когда её долго не трогают.
+    private val idleRunnable = Runnable {
+        playIdleGlitch()
+        scheduleIdle()
+    }
+
     private lateinit var rootView: FrameLayout
+    private lateinit var titleView: TextView
+    private lateinit var suggestBar: LinearLayout
     private lateinit var keysArea: LinearLayout
     private lateinit var clipScroll: ScrollView
     private lateinit var clipList: LinearLayout
@@ -135,7 +147,7 @@ class KlavService : InputMethodService() {
             }
             MotionEvent.ACTION_UP -> {
                 handler.removeCallbacks(spaceLongRunnable)
-                if (!spaceLong) commit(" ")
+                if (!spaceLong) spaceCommit()
             }
             MotionEvent.ACTION_CANCEL -> handler.removeCallbacks(spaceLongRunnable)
             else -> return@OnTouchListener false
@@ -162,14 +174,31 @@ class KlavService : InputMethodService() {
     }
 
     override fun onCreateInputView(): View {
+        // Окно клавиатуры рисуется под системной нижней панелью, чтобы не было белой полосы.
+        window.window?.let { w ->
+            w.navigationBarColor = Color.TRANSPARENT
+            if (Build.VERSION.SDK_INT >= 29) w.isNavigationBarContrastEnforced = false
+            if (Build.VERSION.SDK_INT >= 30) w.setDecorFitsSystemWindows(false)
+        }
+
         val root = FrameLayout(this)
         rootView = root
+        root.setOnApplyWindowInsetsListener { v, insets ->
+            v.setPadding(0, 0, 0, navBottom(insets))
+            insets
+        }
 
         val column = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(4), dp(4), dp(4), dp(6))
         }
         column.addView(buildTopBar(), LinearLayout.LayoutParams(MATCH, WRAP))
+
+        suggestBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            visibility = View.GONE
+        }
+        column.addView(suggestBar, LinearLayout.LayoutParams(MATCH, WRAP))
 
         keysArea = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         column.addView(keysArea, LinearLayout.LayoutParams(MATCH, WRAP))
@@ -179,25 +208,40 @@ class KlavService : InputMethodService() {
             visibility = View.GONE
             addView(clipList)
         }
-        column.addView(clipScroll, LinearLayout.LayoutParams(MATCH, dp(230)))
+        column.addView(clipScroll, LinearLayout.LayoutParams(MATCH, dp(240)))
 
         settingsScroll = ScrollView(this).apply {
             visibility = View.GONE
             addView(buildSettingsPanel())
         }
-        column.addView(settingsScroll, LinearLayout.LayoutParams(MATCH, dp(230)))
+        column.addView(settingsScroll, LinearLayout.LayoutParams(MATCH, dp(240)))
 
         root.addView(column, FrameLayout.LayoutParams(MATCH, WRAP))
         applyAppearance()
         rebuildKeys()
+        root.requestApplyInsets()
         return root
     }
+
+    @Suppress("DEPRECATION")
+    private fun navBottom(insets: WindowInsets): Int =
+        if (Build.VERSION.SDK_INT >= 30) {
+            insets.getInsets(WindowInsets.Type.navigationBars()).bottom
+        } else {
+            insets.systemWindowInsetBottom
+        }
 
     override fun onStartInputView(info: EditorInfo?, restarting: Boolean) {
         super.onStartInputView(info, restarting)
         if (!::rootView.isInitialized) return
         applyAppearance()
         showPanel(Panel.KEYS)
+        scheduleIdle()
+    }
+
+    override fun onFinishInputView(finishingInput: Boolean) {
+        handler.removeCallbacks(idleRunnable)
+        super.onFinishInputView(finishingInput)
     }
 
     override fun onEvaluateFullscreenMode(): Boolean = false
@@ -216,15 +260,13 @@ class KlavService : InputMethodService() {
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(8), 0, dp(4), 0)
         }
-        bar.addView(
-            TextView(this).apply {
-                text = "✦ AVRORA"
-                setTextColor(CYAN)
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-                letterSpacing = 0.15f
-            },
-            LinearLayout.LayoutParams(0, WRAP, 1f)
-        )
+        titleView = TextView(this).apply {
+            text = "✦ AVRORA"
+            setTextColor(CYAN)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+            letterSpacing = 0.15f
+        }
+        bar.addView(titleView, LinearLayout.LayoutParams(0, WRAP, 1f))
         clipButton = chip("📋 Буфер") { togglePanel(Panel.CLIPS) }
         settingsButton = chip("⚙") { togglePanel(Panel.SETTINGS) }
         bar.addView(clipButton, LinearLayout.LayoutParams(WRAP, WRAP))
@@ -252,6 +294,7 @@ class KlavService : InputMethodService() {
         clipButton.setTextColor(if (p == Panel.CLIPS) CYAN else TEXT)
         settingsButton.setTextColor(if (p == Panel.SETTINGS) CYAN else TEXT)
         if (p == Panel.CLIPS) refreshClips()
+        updateSuggestions()
     }
 
     // ---------- Панель настроек визуала ----------
@@ -270,11 +313,22 @@ class KlavService : InputMethodService() {
             Prefs.setKeyAlpha(this, it)
             rebuildKeys()
         })
-        col.addView(hint("Отклик"))
+        col.addView(hint("Отклик и анимации"))
         col.addView(toggle("Звук при нажатии", Prefs.sound(this)) { Prefs.setSound(this, it) })
         col.addView(toggle("Вибрация", Prefs.haptic(this)) { Prefs.setHaptic(this, it) })
         col.addView(toggle("Глитч при нажатии", Prefs.glitch(this)) { Prefs.setGlitch(this, it) })
+        col.addView(toggle("Анимация простоя", Prefs.idleAnim(this)) {
+            Prefs.setIdleAnim(this, it)
+            if (it) scheduleIdle() else handler.removeCallbacks(idleRunnable)
+        })
+        col.addView(hint("Текст"))
         col.addView(toggle("Заглавная после точки", Prefs.autoCap(this)) { Prefs.setAutoCap(this, it) })
+        col.addView(toggle("Автозамена опечаток", Prefs.autoCorrect(this)) { Prefs.setAutoCorrect(this, it) })
+        col.addView(toggle("Подсказки слов", Prefs.suggest(this)) {
+            Prefs.setSuggest(this, it)
+            updateSuggestions()
+        })
+        col.addView(toggle("Точка двойным пробелом", Prefs.doubleSpace(this)) { Prefs.setDoubleSpace(this, it) })
         col.addView(chip("Готово") { showPanel(Panel.KEYS) }.apply {
             layoutParams = LinearLayout.LayoutParams(WRAP, WRAP).apply { setMargins(0, dp(8), 0, 0) }
         })
@@ -319,6 +373,44 @@ class KlavService : InputMethodService() {
         setTextColor(MUTED)
         setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
         setPadding(0, dp(6), 0, dp(2))
+    }
+
+    // ---------- Подсказки слов ----------
+
+    private fun updateSuggestions() {
+        if (!::suggestBar.isInitialized) return
+        suggestBar.removeAllViews()
+        if (!Prefs.suggest(this) || panel != Panel.KEYS) {
+            suggestBar.visibility = View.GONE
+            return
+        }
+        val before = currentInputConnection?.getTextBeforeCursor(30, 0)?.toString() ?: ""
+        val prefix = before.takeLastWhile { it.isLetter() }
+        val words = Words.suggest(prefix, lastLetterMode == Mode.RU)
+        if (words.isEmpty()) {
+            suggestBar.visibility = View.GONE
+            return
+        }
+        suggestBar.visibility = View.VISIBLE
+        words.forEach { w ->
+            val shown = Words.applyCase(prefix, w)
+            suggestBar.addView(TextView(this).apply {
+                text = shown
+                gravity = Gravity.CENTER
+                setTextColor(TEXT)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                background = roundRect(Appearance.keyFill(Prefs.keyAlpha(this@KlavService)), STROKE)
+                layoutParams = LinearLayout.LayoutParams(0, dp(34), 1f).apply {
+                    setMargins(dp(2), dp(2), dp(2), dp(2))
+                }
+                setOnClickListener { acceptSuggestion(prefix, shown) }
+            })
+        }
+    }
+
+    private fun acceptSuggestion(prefix: String, word: String) {
+        currentInputConnection?.deleteSurroundingText(prefix.length, 0)
+        commit("$word ")
     }
 
     // ---------- Буфер обмена ----------
@@ -403,6 +495,7 @@ class KlavService : InputMethodService() {
             }
         }
         keysArea.addView(bottomRow())
+        updateSuggestions()
     }
 
     private fun bottomRow(): View {
@@ -417,12 +510,12 @@ class KlavService : InputMethodService() {
             setMode(if (mode == Mode.SYM) lastLetterMode else Mode.SYM)
         })
         line.addView(key(if (letterTarget == Mode.RU) "RU" else "EN", 1.2f) { setMode(letterTarget) })
-        line.addView(key(",", 0.8f) { commit(",") })
+        line.addView(key(",", 0.8f) { punct(",") })
         line.addView(
             key(if (lastLetterMode == Mode.RU) "пробел" else "space", 3.6f) { }
                 .also { it.setOnTouchListener(spaceTouch) }
         )
-        line.addView(key(".", 0.8f) { commit(".") })
+        line.addView(key(".", 0.8f) { punct(".") })
         line.addView(key("⏎", 1.6f, active = true) { enter() })
         return line
     }
@@ -461,6 +554,7 @@ class KlavService : InputMethodService() {
     // ---------- Отклик: звук, вибрация, глитч ----------
 
     private fun feedback(v: View) {
+        scheduleIdle()
         if (Prefs.sound(this)) tone?.startTone(ToneGenerator.TONE_PROP_BEEP2, 10)
         buzz()
         glitch(v)
@@ -476,9 +570,13 @@ class KlavService : InputMethodService() {
         }
     }
 
-    /** Короткий сдвиг клавиши и розовая тень на время нажатия. */
+    /** Глитч при нажатии, если он включён в настройках. */
     private fun glitch(v: View) {
-        if (!Prefs.glitch(this)) return
+        if (Prefs.glitch(this)) flashKey(v)
+    }
+
+    /** Короткий сдвиг клавиши и розовая тень. */
+    private fun flashKey(v: View) {
         v.animate().cancel()
         v.translationX = dp(2).toFloat()
         v.animate().translationX(0f).setDuration(120).start()
@@ -487,7 +585,41 @@ class KlavService : InputMethodService() {
         tv.postDelayed({ tv.setShadowLayer(0f, 0f, 0f, 0) }, 120)
     }
 
-    // ---------- Действия ----------
+    // ---------- Idle-анимация ----------
+
+    private fun scheduleIdle() {
+        handler.removeCallbacks(idleRunnable)
+        if (!Prefs.idleAnim(this)) return
+        handler.postDelayed(idleRunnable, IDLE_MIN_MS + Random.nextLong(IDLE_RANGE_MS))
+    }
+
+    /** Несколько коротких сбоев: дёргаются клавиши, сдвигается ряд и мигает заголовок. */
+    private fun playIdleGlitch() {
+        if (panel != Panel.KEYS || !::keysArea.isInitialized) return
+        val keys = ArrayList<TextView>()
+        collectTextViews(keysArea, keys)
+        if (keys.isEmpty()) return
+        repeat(3) { i ->
+            handler.postDelayed({
+                flashKey(keys.random())
+                val shiftPx = if (i % 2 == 0) dp(3) else -dp(3)
+                keysArea.translationX = shiftPx.toFloat()
+                keysArea.animate().translationX(0f).setDuration(70).start()
+                titleView.animate().alpha(0.3f).setDuration(60).withEndAction {
+                    titleView.animate().alpha(1f).setDuration(120).start()
+                }.start()
+            }, i * 110L)
+        }
+    }
+
+    private fun collectTextViews(v: View, out: MutableList<TextView>) {
+        if (v is TextView && v.text.isNotEmpty()) out.add(v)
+        if (v is ViewGroup) {
+            for (i in 0 until v.childCount) collectTextViews(v.getChildAt(i), out)
+        }
+    }
+
+    // ---------- Ввод текста ----------
 
     private fun setMode(m: Mode) {
         if (m != Mode.SYM) lastLetterMode = m
@@ -510,25 +642,63 @@ class KlavService : InputMethodService() {
         }
     }
 
-    /** Заглавная буква нужна в начале текста и после точки (или ! ?) с пробелом. */
+    /**
+     * Заглавная нужна в начале текста и сразу после точки, восклицательного или вопросительного знака,
+     * с пробелом или без него.
+     */
     private fun autoCapNow(): Boolean {
         if (!Prefs.autoCap(this)) return false
-        val before = currentInputConnection?.getTextBeforeCursor(3, 0)?.toString() ?: return false
+        val before = currentInputConnection?.getTextBeforeCursor(4, 0)?.toString() ?: return false
         if (before.isEmpty() || before.endsWith("\n")) return true
-        if (!before.endsWith(" ")) return false
-        val trimmed = before.trimEnd()
+        val trimmed = before.trimEnd(' ')
         return trimmed.isNotEmpty() && trimmed.last() in ".!?"
+    }
+
+    /** Знаки препинания: сначала автозамена последнего слова, потом сам знак. */
+    private fun punct(c: String) {
+        autoCorrectWord()
+        commit(c)
+    }
+
+    private fun spaceCommit() {
+        val now = System.currentTimeMillis()
+        val before = currentInputConnection?.getTextBeforeCursor(2, 0)?.toString() ?: ""
+        val doubleTap = Prefs.doubleSpace(this) && now - lastSpaceAt < 400L
+        if (doubleTap && before.length == 2 && before[1] == ' ' && before[0].isLetterOrDigit()) {
+            currentInputConnection?.deleteSurroundingText(1, 0)
+            commit(". ")
+            lastSpaceAt = 0L
+        } else {
+            autoCorrectWord()
+            commit(" ")
+            lastSpaceAt = now
+        }
+    }
+
+    /** Заменяет последнее слово, если оно есть в списке опечаток. */
+    private fun autoCorrectWord() {
+        if (!Prefs.autoCorrect(this)) return
+        val ic = currentInputConnection ?: return
+        val before = ic.getTextBeforeCursor(40, 0)?.toString() ?: return
+        val word = before.takeLastWhile { it.isLetter() || it == '\'' }
+        if (word.isEmpty()) return
+        val fix = Words.correction(word) ?: return
+        ic.deleteSurroundingText(word.length, 0)
+        ic.commitText(fix, 1)
     }
 
     private fun commit(s: String) {
         currentInputConnection?.commitText(s, 1)
+        updateSuggestions()
     }
 
     private fun deleteOne() {
         currentInputConnection?.deleteSurroundingText(1, 0)
+        updateSuggestions()
     }
 
     private fun enter() {
+        autoCorrectWord()
         val ic = currentInputConnection ?: return
         val info = currentInputEditorInfo
         val action = info.imeOptions and EditorInfo.IME_MASK_ACTION
@@ -538,6 +708,7 @@ class KlavService : InputMethodService() {
         } else {
             ic.performEditorAction(action)
         }
+        updateSuggestions()
     }
 
     // ---------- Утилиты ----------
@@ -548,6 +719,9 @@ class KlavService : InputMethodService() {
     companion object {
         private val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
         private val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
+
+        private const val IDLE_MIN_MS = 5000L
+        private const val IDLE_RANGE_MS = 4000L
 
         private val RU_ROWS = listOf("йцукенгшщзх", "фывапролджэ", "ячсмитьбю")
         private val EN_ROWS = listOf("qwertyuiop", "asdfghjkl", "zxcvbnm")

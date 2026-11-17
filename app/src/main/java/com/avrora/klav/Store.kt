@@ -32,36 +32,63 @@ object Prefs {
 
     fun file(ctx: Context) = ctx.getSharedPreferences(NAME, Context.MODE_PRIVATE)
 
+    private fun b(ctx: Context, k: String, def: Boolean) = file(ctx).getBoolean(k, def)
+    private fun setB(ctx: Context, k: String, v: Boolean) = file(ctx).edit().putBoolean(k, v).apply()
+    private fun i(ctx: Context, k: String, def: Int) = file(ctx).getInt(k, def)
+    private fun setI(ctx: Context, k: String, v: Int) = file(ctx).edit().putInt(k, v).apply()
+
     fun bgUri(ctx: Context): String? = file(ctx).getString("bg_uri", null)
     fun setBgUri(ctx: Context, v: String?) = file(ctx).edit().putString("bg_uri", v).apply()
 
     /** Затемнение фона, 0..90 процентов. */
-    fun dim(ctx: Context): Int = file(ctx).getInt("bg_dim", 55)
-    fun setDim(ctx: Context, v: Int) = file(ctx).edit().putInt("bg_dim", v).apply()
+    fun dim(ctx: Context) = i(ctx, "bg_dim", 55)
+    fun setDim(ctx: Context, v: Int) = setI(ctx, "bg_dim", v)
+
+    /** Масштаб фона, 100..300 процентов. */
+    fun bgZoom(ctx: Context) = i(ctx, "bg_zoom", 100)
+    fun setBgZoom(ctx: Context, v: Int) = setI(ctx, "bg_zoom", v)
+
+    /** Смещение фона по осям, от -1 до 1 (0 — по центру). */
+    fun bgOx(ctx: Context): Float = file(ctx).getFloat("bg_ox", 0f)
+    fun bgOy(ctx: Context): Float = file(ctx).getFloat("bg_oy", 0f)
+    fun setBgOffset(ctx: Context, x: Float, y: Float) =
+        file(ctx).edit().putFloat("bg_ox", x).putFloat("bg_oy", y).apply()
 
     /** Непрозрачность заливки клавиш, 0..100 процентов. 0 — полностью прозрачные. */
-    fun keyAlpha(ctx: Context): Int = file(ctx).getInt("key_alpha", 20)
-    fun setKeyAlpha(ctx: Context, v: Int) = file(ctx).edit().putInt("key_alpha", v).apply()
+    fun keyAlpha(ctx: Context) = i(ctx, "key_alpha", 20)
+    fun setKeyAlpha(ctx: Context, v: Int) = setI(ctx, "key_alpha", v)
 
-    fun sound(ctx: Context): Boolean = file(ctx).getBoolean("sfx", true)
-    fun setSound(ctx: Context, v: Boolean) = file(ctx).edit().putBoolean("sfx", v).apply()
+    fun sound(ctx: Context) = b(ctx, "sfx", true)
+    fun setSound(ctx: Context, v: Boolean) = setB(ctx, "sfx", v)
 
-    fun haptic(ctx: Context): Boolean = file(ctx).getBoolean("haptic", true)
-    fun setHaptic(ctx: Context, v: Boolean) = file(ctx).edit().putBoolean("haptic", v).apply()
+    fun haptic(ctx: Context) = b(ctx, "haptic", true)
+    fun setHaptic(ctx: Context, v: Boolean) = setB(ctx, "haptic", v)
 
-    fun glitch(ctx: Context): Boolean = file(ctx).getBoolean("glitch", true)
-    fun setGlitch(ctx: Context, v: Boolean) = file(ctx).edit().putBoolean("glitch", v).apply()
+    fun glitch(ctx: Context) = b(ctx, "glitch", true)
+    fun setGlitch(ctx: Context, v: Boolean) = setB(ctx, "glitch", v)
 
-    fun autoCap(ctx: Context): Boolean = file(ctx).getBoolean("autocap", true)
-    fun setAutoCap(ctx: Context, v: Boolean) = file(ctx).edit().putBoolean("autocap", v).apply()
+    fun autoCap(ctx: Context) = b(ctx, "autocap", true)
+    fun setAutoCap(ctx: Context, v: Boolean) = setB(ctx, "autocap", v)
+
+    fun autoCorrect(ctx: Context) = b(ctx, "autocorrect", true)
+    fun setAutoCorrect(ctx: Context, v: Boolean) = setB(ctx, "autocorrect", v)
+
+    fun suggest(ctx: Context) = b(ctx, "suggest", true)
+    fun setSuggest(ctx: Context, v: Boolean) = setB(ctx, "suggest", v)
+
+    fun doubleSpace(ctx: Context) = b(ctx, "double_space", true)
+    fun setDoubleSpace(ctx: Context, v: Boolean) = setB(ctx, "double_space", v)
+
+    fun idleAnim(ctx: Context) = b(ctx, "idle_anim", true)
+    fun setIdleAnim(ctx: Context, v: Boolean) = setB(ctx, "idle_anim", v)
 }
 
-/** Общие правила оформления, которые используют клавиатура и экран настроек. */
+/** Общие правила оформления: клавиатура и экран настроек рисуют фон одинаково. */
 object Appearance {
     private var cachedUri: String? = null
     private var cachedBitmap: Bitmap? = null
 
-    /** Заливка клавиши: тот же тёмно-синий, но с настраиваемой непрозрачностью. */
+    /** Заливка клавиши: тёмно-синий с настраиваемой непрозрачностью. */
     fun keyFill(alpha: Int): Int = Color.argb(alpha * 255 / 100, 26, 34, 54)
 
     fun bitmap(ctx: Context, uri: String?): Bitmap? {
@@ -85,7 +112,19 @@ object Appearance {
 
     fun backgroundDrawable(ctx: Context, uri: String?, dim: Int): Drawable {
         val bmp = bitmap(ctx, uri) ?: return ColorDrawable(Colors.BG)
-        return CropDrawable(bmp, Color.argb(dim * 255 / 100, 11, 15, 26))
+        return CropDrawable(
+            bmp,
+            Color.argb(dim * 255 / 100, 11, 15, 26),
+            Prefs.bgOx(ctx),
+            Prefs.bgOy(ctx),
+            Prefs.bgZoom(ctx) / 100f
+        )
+    }
+
+    /** Насколько картинку можно сдвинуть в каждую сторону, в пикселях. */
+    fun panRange(bmpW: Int, bmpH: Int, viewW: Float, viewH: Float, zoom: Float): Pair<Float, Float> {
+        val s = maxOf(viewW / bmpW, viewH / bmpH) * zoom
+        return Pair(maxOf(0f, (bmpW * s - viewW) / 2f), maxOf(0f, (bmpH * s - viewH) / 2f))
     }
 }
 
@@ -143,8 +182,14 @@ object ClipStore {
     }
 }
 
-/** Рисует картинку по центру с заполнением (как CENTER_CROP) и затемнением поверх. */
-internal class CropDrawable(private val bmp: Bitmap, dimColor: Int) : Drawable() {
+/** Рисует картинку с заполнением (как CENTER_CROP), масштабом, смещением и затемнением. */
+internal class CropDrawable(
+    private val bmp: Bitmap,
+    dimColor: Int,
+    private val ox: Float,
+    private val oy: Float,
+    private val zoom: Float
+) : Drawable() {
     private val paint = Paint(Paint.FILTER_BITMAP_FLAG)
     private val dimPaint = Paint().apply { color = dimColor }
     private val src = Rect(0, 0, bmp.width, bmp.height)
@@ -153,11 +198,14 @@ internal class CropDrawable(private val bmp: Bitmap, dimColor: Int) : Drawable()
     override fun draw(canvas: Canvas) {
         val b = bounds
         if (b.isEmpty) return
-        val scale = maxOf(b.width().toFloat() / bmp.width, b.height().toFloat() / bmp.height)
-        val w = bmp.width * scale
-        val h = bmp.height * scale
-        val left = b.left + (b.width() - w) / 2f
-        val top = b.top + (b.height() - h) / 2f
+        val bw = b.width().toFloat()
+        val bh = b.height().toFloat()
+        val (rx, ry) = Appearance.panRange(bmp.width, bmp.height, bw, bh, zoom)
+        val s = maxOf(bw / bmp.width, bh / bmp.height) * zoom
+        val w = bmp.width * s
+        val h = bmp.height * s
+        val left = b.left + (bw - w) / 2f + ox.coerceIn(-1f, 1f) * rx
+        val top = b.top + (bh - h) / 2f + oy.coerceIn(-1f, 1f) * ry
         dst.set(left, top, left + w, top + h)
         canvas.drawBitmap(bmp, src, dst, paint)
         canvas.drawRect(b, dimPaint)

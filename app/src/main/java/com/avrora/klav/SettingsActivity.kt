@@ -8,12 +8,14 @@ import android.os.Bundle
 import android.provider.Settings
 import android.util.TypedValue
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.ViewGroup
 import android.view.inputmethod.InputMethodManager
 import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
 import com.avrora.klav.Colors.CYAN
@@ -29,6 +31,10 @@ class SettingsActivity : Activity() {
 
     private lateinit var preview: FrameLayout
     private lateinit var previewKeys: LinearLayout
+    private lateinit var zoomLabel: TextView
+
+    private var lastX = 0f
+    private var lastY = 0f
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -41,21 +47,52 @@ class SettingsActivity : Activity() {
         col.addView(styledText("✦ AvrorA Klav", 24f, CYAN))
         col.addView(styledText("Клавиатура с буфером обмена и фоном в стиле Авроры.", 14f, MUTED))
 
-        col.addView(styledText("Предпросмотр", 14f, TEXT))
+        col.addView(styledText("Предпросмотр фона", 14f, TEXT))
         preview = FrameLayout(this)
         previewKeys = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(10), dp(10), dp(10), dp(10))
         }
         preview.addView(previewKeys, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        preview.setOnTouchListener { _, e -> onPreviewTouch(e) }
         col.addView(
             preview,
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(220)).apply {
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(240)).apply {
                 setMargins(0, dp(6), 0, dp(6))
             }
         )
+        col.addView(styledText("Перетаскивай картинку в предпросмотре, чтобы выбрать нужный кусок.", 13f, MUTED))
+
+        val zoom = Prefs.bgZoom(this)
+        zoomLabel = styledText("Масштаб: $zoom%", 14f, TEXT)
+        col.addView(zoomLabel)
+        col.addView(
+            SeekBar(this).apply {
+                max = 200
+                progress = zoom - 100
+                setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                    override fun onProgressChanged(sb: SeekBar?, p: Int, fromUser: Boolean) {
+                        if (!fromUser) return
+                        Prefs.setBgZoom(this@SettingsActivity, 100 + p)
+                        zoomLabel.text = "Масштаб: ${100 + p}%"
+                        refreshPreview()
+                    }
+
+                    override fun onStartTrackingTouch(sb: SeekBar?) {}
+
+                    override fun onStopTrackingTouch(sb: SeekBar?) {}
+                })
+            },
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        )
 
         col.addView(button("Выбрать фон") { pickBackground() })
+        col.addView(button("Сбросить положение и масштаб") {
+            Prefs.setBgOffset(this, 0f, 0f)
+            Prefs.setBgZoom(this, 100)
+            zoomLabel.text = "Масштаб: 100%"
+            refreshPreview()
+        })
         col.addView(button("Убрать фон") {
             Prefs.setBgUri(this, null)
             refreshPreview()
@@ -63,7 +100,7 @@ class SettingsActivity : Activity() {
         })
         col.addView(
             styledText(
-                "Затемнение, прозрачность клавиш, звук, вибрация и глитч настраиваются прямо в клавиатуре: нажми ⚙ на её верхней панели.",
+                "Затемнение, прозрачность клавиш, звук, вибрация, глитч, автозамена и подсказки настраиваются прямо в клавиатуре: нажми ⚙ на её верхней панели.",
                 13f,
                 MUTED
             )
@@ -89,6 +126,35 @@ class SettingsActivity : Activity() {
         refreshPreview()
     }
 
+    /** Перетаскивание картинки: двигает фон внутри предпросмотра и сохраняет положение. */
+    private fun onPreviewTouch(e: MotionEvent): Boolean {
+        when (e.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                lastX = e.x
+                lastY = e.y
+                return true
+            }
+            MotionEvent.ACTION_MOVE -> {
+                val bmp = Appearance.bitmap(this, Prefs.bgUri(this)) ?: return true
+                val (rx, ry) = Appearance.panRange(
+                    bmp.width, bmp.height,
+                    preview.width.toFloat(), preview.height.toFloat(),
+                    Prefs.bgZoom(this) / 100f
+                )
+                var ox = Prefs.bgOx(this)
+                var oy = Prefs.bgOy(this)
+                if (rx > 0f) ox = (ox + (e.x - lastX) / rx).coerceIn(-1f, 1f)
+                if (ry > 0f) oy = (oy + (e.y - lastY) / ry).coerceIn(-1f, 1f)
+                Prefs.setBgOffset(this, ox, oy)
+                lastX = e.x
+                lastY = e.y
+                refreshPreview()
+                return true
+            }
+        }
+        return false
+    }
+
     /** Показывает фон и образец клавиш так, как они будут выглядеть в клавиатуре. */
     private fun refreshPreview() {
         preview.background = Appearance.backgroundDrawable(this, Prefs.bgUri(this), Prefs.dim(this))
@@ -97,7 +163,10 @@ class SettingsActivity : Activity() {
         listOf("qwertyuiop", "asdfghjkl", "zxcvbnm").forEach { letters ->
             val line = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
             letters.forEach { ch -> line.addView(sampleKey(ch.toString(), alpha)) }
-            previewKeys.addView(line, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+            previewKeys.addView(
+                line,
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            )
         }
     }
 
@@ -136,6 +205,7 @@ class SettingsActivity : Activity() {
             // Провайдер не даёт постоянный доступ: фон сохранится до перезапуска.
         }
         Prefs.setBgUri(this, uri.toString())
+        Prefs.setBgOffset(this, 0f, 0f)
         refreshPreview()
         toast("Фон установлен")
     }
