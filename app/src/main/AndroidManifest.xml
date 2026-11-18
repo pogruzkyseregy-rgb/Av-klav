@@ -22,6 +22,13 @@
                 android:resource="@xml/method" />
         </service>
 
+        <!-- Отдаёт стикеры из assets другим приложениям по content://-адресу (только по выданному доступу). -->
+        <provider
+            android:name=".StickerProvider"
+            android:authorities="com.avrora.klav.stickers"
+            android:exported="false"
+            android:grantUriPermissions="true" />
+
         <activity
             android:name=".SettingsActivity"
             android:exported="true">

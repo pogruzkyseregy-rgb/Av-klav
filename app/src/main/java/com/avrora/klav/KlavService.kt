@@ -1,7 +1,15 @@
 package com.avrora.klav
 
+import android.content.ClipData
+import android.content.ClipDescription
 import android.content.ClipboardManager
 import android.content.Context
+import android.graphics.BitmapFactory
+import android.net.Uri
+import android.view.inputmethod.InputConnection
+import android.view.inputmethod.InputContentInfo
+import android.widget.ImageView
+import android.widget.Toast
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
 import android.inputmethodservice.InputMethodService
@@ -119,6 +127,8 @@ class KlavService : InputMethodService() {
 
     /** Сохраняет каждое новое скопированное значение в историю буфера. */
     private val clipListener = ClipboardManager.OnPrimaryClipChangedListener {
+        // Стикеры кладутся в буфер как картинки: в историю текста они не попадают.
+        if (clipboard.primaryClipDescription?.hasMimeType("image/*") == true) return@OnPrimaryClipChangedListener
         val text = clipboard.primaryClip
             ?.takeIf { it.itemCount > 0 }
             ?.getItemAt(0)
@@ -491,7 +501,11 @@ class KlavService : InputMethodService() {
     /** Сетка смайликов выбранной категории. Панель остаётся открытой, пока её не закроют. */
     private fun renderEmoji() {
         emojiBox.removeAllViews()
-        val items = if (emojiCat == 0) Prefs.recentEmoji(this) else EMOJI_TABS[emojiCat].second.split(" ")
+        if (emojiCat == EMOJI_TABS.lastIndex) {
+            renderStickers()
+            return
+        }
+        val items =if (emojiCat == 0) Prefs.recentEmoji(this) else EMOJI_TABS[emojiCat].second.split(" ")
         if (items.isEmpty()) {
             emojiBox.addView(hint("Пока пусто. Выбери смайлик, и он появится здесь."))
             return
@@ -510,6 +524,53 @@ class KlavService : InputMethodService() {
             repeat(8 - line.size) { r.addView(View(this), LinearLayout.LayoutParams(0, dp(46), 1f)) }
             emojiBox.addView(r)
         }
+    }
+
+    /** Сетка стикеров Авроры из assets. Нажатие отправляет картинку в поле ввода. */
+    private fun renderStickers() {
+        val files = (assets.list(STICKER_DIR) ?: emptyArray()).filter { it.endsWith(".png") }.sorted()
+        if (files.isEmpty()) {
+            emojiBox.addView(hint("Стикеры не найдены."))
+            return
+        }
+        files.chunked(3).forEach { line ->
+            val r = row()
+            line.forEach { file ->
+                val bmp = try {
+                    assets.open("$STICKER_DIR/$file").use { BitmapFactory.decodeStream(it) }
+                } catch (e: Exception) {
+                    null
+                }
+                r.addView(ImageView(this).apply {
+                    scaleType = ImageView.ScaleType.FIT_CENTER
+                    setImageBitmap(bmp)
+                    setPadding(dp(4), dp(4), dp(4), dp(4))
+                    layoutParams = LinearLayout.LayoutParams(0, dp(96), 1f)
+                    setOnClickListener { insertSticker(file) }
+                })
+            }
+            repeat(3 - line.size) { r.addView(View(this), LinearLayout.LayoutParams(0, dp(96), 1f)) }
+            emojiBox.addView(r)
+        }
+    }
+
+    /**
+     * Отправляет стикер картинкой через commitContent. Если приложение картинки не принимает,
+     * стикер кладётся в буфер, и его можно вставить вручную.
+     */
+    private fun insertSticker(file: String) {
+        val uri = Uri.parse("content://${StickerProvider.AUTHORITY}/$file")
+        val ic = currentInputConnection
+        val accepts = currentInputEditorInfo?.contentMimeTypes?.any { it == "image/png" || it == "image/*" } == true
+        if (ic != null && accepts && Build.VERSION.SDK_INT >= 25 && commitImage(ic, uri)) return
+        clipboard.setPrimaryClip(ClipData.newUri(contentResolver, "sticker", uri))
+        Toast.makeText(this, "Стикер в буфере: вставь его в поле ввода", Toast.LENGTH_SHORT).show()
+    }
+
+    @Suppress("NewApi")
+    private fun commitImage(ic: InputConnection, uri: Uri): Boolean {
+        val info = InputContentInfo(uri, ClipDescription("sticker", arrayOf("image/png")))
+        return ic.commitContent(info, InputConnection.INPUT_CONTENT_GRANT_READ_URI_PERMISSION, null)
     }
 
     private fun insertEmoji(e: String) {
@@ -1139,6 +1200,8 @@ class KlavService : InputMethodService() {
         private val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
         private val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
 
+        private const val STICKER_DIR = "stickers"
+
         private const val IDLE_MIN_MS = 5000L
         private const val IDLE_RANGE_MS = 4000L
 
@@ -1161,7 +1224,9 @@ class KlavService : InputMethodService() {
             "🐶" to "🐶 🐱 🐭 🐹 🐰 🦊 🐻 🐼 🐨 🐯 🦁 🐮 🐷 🐸 🐵 🐔 🐧 🐦 🦄 🐝 🦋 🐢 🐙 🐬",
             "🍎" to "🍏 🍎 🍊 🍋 🍌 🍉 🍇 🍓 🍒 🍑 🥭 🍍 🥝 🍅 🥑 🍕 🍔 🍟 🌭 🍿 🍩 🍪 🎂 🍰 🍫 ☕ 🍵 🍺",
             "⚽" to "⚽ 🏀 🏈 ⚾ 🎾 🏐 🎱 🏓 🥊 🎮 🎯 🎲 🎳 🏆 🥇 🎨 🎵 🎸 🎧 🎬 📷 🎤 🚴 🏃 🏊",
-            "❤️" to "❤️ 🧡 💛 💚 💙 💜 🖤 💔 ✨ ⭐ 🔥 💥 💫 🌈 ☀️ 🌙 ⚡ ❄️ 💧 🌸 🌹 🎉 🎁 💡 📌 📎 ✅ ❌ ⚠️ 💯"
+            "❤️" to "❤️ 🧡 💛 💚 💙 💜 🖤 💔 ✨ ⭐ 🔥 💥 💫 🌈 ☀️ 🌙 ⚡ ❄️ 💧 🌸 🌹 🎉 🎁 💡 📌 📎 ✅ ❌ ⚠️ 💯",
+            // Последняя вкладка — стикеры Авроры (см. renderEmoji).
+            "🦊" to "STICKERS"
         )
     }
 }
