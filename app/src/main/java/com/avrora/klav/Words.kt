@@ -1,6 +1,7 @@
 package com.avrora.klav
 
 import android.content.Context
+import org.json.JSONObject
 import kotlin.math.abs
 import kotlin.math.min
 
@@ -34,6 +35,21 @@ internal object Words {
     private var appCtx: Context? = null
     private val personal = LinkedHashSet<String>()
 
+    /** Пары слов «предыдущее следующее» → сколько раз пользователь так набирал. */
+    private val pairs = HashMap<String, Int>()
+    private const val PAIR_KEY = "bigrams"
+    private const val PAIR_MAX = 1500
+
+    /** Небольшой встроенный набор частых пар, чтобы подсказки работали с первого запуска. */
+    private val BUILTIN: Map<String, String> = mapOf(
+        "спасибо" to "большое", "доброе" to "утро", "добрый" to "день", "до" to "свидания",
+        "как" to "дела", "не" to "могу", "хорошо" to "бы", "то" to "есть", "так" to "что",
+        "очень" to "рад", "спокойной" to "ночи", "всё" to "равно", "что" to "же",
+        "thank" to "you", "good" to "morning", "see" to "you", "let" to "me", "how" to "are",
+        "i" to "am", "of" to "course", "a" to "lot", "want" to "to", "going" to "to",
+        "you" to "know", "is" to "it", "have" to "a", "in" to "the"
+    )
+
     private val ru: Dict by lazy { load(R.raw.words_ru) }
     private val en: Dict by lazy { load(R.raw.words_en) }
 
@@ -66,6 +82,73 @@ internal object Words {
         val app = ctx.applicationContext
         appCtx = app
         Prefs.file(app).getStringSet(PERSONAL_KEY, null)?.let { personal.addAll(it) }
+        loadPairs(app)
+    }
+
+    private fun loadPairs(app: Context) {
+        try {
+            val s = Prefs.file(app).getString(PAIR_KEY, null) ?: return
+            val o = JSONObject(s)
+            o.keys().forEach { k -> pairs[k] = o.getInt(k) }
+        } catch (e: Exception) {
+            pairs.clear()
+        }
+    }
+
+    /** Запоминает, какое слово пользователь набрал после какого. Старые редкие пары удаляются. */
+    fun learnPair(prev: String, next: String) {
+        val p = prev.lowercase()
+        val n = next.lowercase()
+        if (p.isEmpty() || n.isEmpty()) return
+        val key = "$p $n"
+        pairs[key] = (pairs[key] ?: 0) + 1
+        if (pairs.size > PAIR_MAX) {
+            pairs.entries.sortedBy { it.value }
+                .take(pairs.size - PAIR_MAX * 4 / 5)
+                .map { it.key }
+                .forEach { pairs.remove(it) }
+        }
+        val ctx = appCtx ?: return
+        Prefs.file(ctx).edit().putString(PAIR_KEY, JSONObject(pairs.toMap()).toString()).apply()
+    }
+
+    /** До двух слов, которые чаще всего идут за [prev]: сначала свои, потом встроенные. */
+    fun predict(prev: String): List<String> {
+        val p = prev.lowercase()
+        if (p.isEmpty()) return emptyList()
+        val head = "$p "
+        val learned = pairs.entries
+            .filter { it.key.startsWith(head) }
+            .sortedByDescending { it.value }
+            .map { it.key.substring(head.length) }
+        return (learned + listOfNotNull(BUILTIN[p])).distinct().take(2)
+    }
+
+    /**
+     * Слово по следу свайпа: первая и последняя буква совпадают, а буквы близки по раскладке.
+     * Среди подходящих выигрывает более частое слово. Возвращает null, если ничего не подошло.
+     */
+    fun swipe(path: String, russian: Boolean): String? {
+        if (path.length < 3) return null
+        val dict = if (russian) ru else en
+        val first = path.first()
+        val last = path.last()
+        val max = 1.0 + path.length * 0.35
+        var best: String? = null
+        var bestScore = Double.MAX_VALUE
+        val n = dict.words.size.toDouble()
+        for ((rank, w) in dict.words.withIndex()) {
+            if (w.length < 2 || w.first() != first || w.last() != last) continue
+            if (abs(w.length - path.length) > 3) continue
+            val d = weightedDistance(w, path, max)
+            if (d > max) continue
+            val score = d + 0.2 * rank / n
+            if (score < bestScore) {
+                bestScore = score
+                best = w
+            }
+        }
+        return best
     }
 
     /** Прогрев словарей в фоновом потоке. Не трогает личный словарь. */

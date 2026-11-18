@@ -23,6 +23,7 @@ import android.view.ViewGroup
 import android.view.WindowInsetsController
 import android.view.inputmethod.EditorInfo
 import android.widget.FrameLayout
+import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.SeekBar
@@ -35,12 +36,13 @@ import com.avrora.klav.Colors.PINK
 import com.avrora.klav.Colors.STROKE
 import com.avrora.klav.Colors.TEXT
 import kotlin.math.abs
+import kotlin.math.hypot
 import kotlin.random.Random
 
 class KlavService : InputMethodService() {
 
     private enum class Mode { RU, EN, SYM }
-    private enum class Panel { KEYS, CLIPS, SETTINGS, PUNCT }
+    private enum class Panel { KEYS, CLIPS, SETTINGS, PUNCT, EMOJI }
 
     /** Подсказка при касании к слову, которое исправила автозамена: можно вернуть исходное. */
     private class Hint(val fixed: String, val original: String, val beforeLen: Int, val afterLen: Int)
@@ -60,6 +62,20 @@ class KlavService : InputMethodService() {
     private val recentFixes = LinkedHashMap<String, String>()
     private var activeHint: Hint? = null
     private var lastEditAt = 0L
+
+    /** Последнее законченное слово (в нижнем регистре). От него строятся подсказки следующего слова. */
+    private var prevWord = ""
+
+    // Свайп-ввод: буквы, над которыми прошёл палец, и состояние текущего касания.
+    private val letterViews = ArrayList<View>()
+    private val swipePath = StringBuilder()
+    private var swipeMoved = false
+    private var downX = 0f
+    private var downY = 0f
+    private var downChar = ""
+
+    // Эмодзи-панель: выбранная вкладка.
+    private var emojiCat = 1
 
     // Состояние длинного нажатия пробела (курсор).
     private var spaceX = 0f
@@ -84,6 +100,9 @@ class KlavService : InputMethodService() {
     private lateinit var clipList: LinearLayout
     private lateinit var settingsScroll: ScrollView
     private lateinit var punctScroll: ScrollView
+    private lateinit var emojiPanelView: View
+    private lateinit var emojiTabs: LinearLayout
+    private lateinit var emojiBox: LinearLayout
     private lateinit var clipButton: TextView
     private lateinit var settingsButton: TextView
 
@@ -133,6 +152,46 @@ class KlavService : InputMethodService() {
             }
             else -> false
         }
+    }
+
+    /**
+     * Буквы: короткое нажатие печатает букву, а проведённый по буквам палец
+     * превращается в слово (свайп-ввод).
+     */
+    private val letterTouch = View.OnTouchListener { v, e ->
+        val ch = v.tag as? String ?: return@OnTouchListener false
+        when (e.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                feedback(v)
+                downChar = ch
+                swipePath.setLength(0)
+                swipePath.append(ch)
+                downX = e.rawX
+                downY = e.rawY
+                swipeMoved = false
+            }
+            MotionEvent.ACTION_MOVE -> {
+                if (!swipeMoved && hypot((e.rawX - downX).toDouble(), (e.rawY - downY).toDouble()) > dp(14).toDouble()) {
+                    swipeMoved = true
+                }
+                if (swipeMoved && Prefs.swipe(this)) {
+                    val k = letterAt(e.rawX, e.rawY)
+                    if (k != null && k != swipePath.last().toString()) swipePath.append(k)
+                }
+            }
+            MotionEvent.ACTION_UP -> {
+                if (Prefs.swipe(this) && swipeMoved && swipePath.length >= 3) {
+                    swipeCommit(swipePath.toString())
+                } else {
+                    onChar(downChar)
+                }
+            }
+            MotionEvent.ACTION_CANCEL -> {
+                swipeMoved = false
+            }
+            else -> return@OnTouchListener false
+        }
+        true
     }
 
     /**
@@ -189,6 +248,7 @@ class KlavService : InputMethodService() {
     }
 
     override fun onCreateInputView(): View {
+        Colors.applyTheme(Prefs.theme(this))
         val root = FrameLayout(this)
         rootView = root
 
@@ -226,9 +286,13 @@ class KlavService : InputMethodService() {
         }
         column.addView(punctScroll, LinearLayout.LayoutParams(MATCH, dp(240)))
 
+        emojiPanelView = buildEmojiPanel().apply { visibility = View.GONE }
+        column.addView(emojiPanelView, LinearLayout.LayoutParams(MATCH, dp(240)))
+
         root.addView(column, FrameLayout.LayoutParams(MATCH, WRAP))
         applyAppearance()
         rebuildKeys()
+        showPanel(panel)
         return root
     }
 
@@ -237,6 +301,7 @@ class KlavService : InputMethodService() {
         if (!::rootView.isInitialized) return
         applyAppearance()
         activeHint = null
+        prevWord = ""
         showPanel(Panel.KEYS)
         scheduleIdle()
     }
@@ -300,6 +365,12 @@ class KlavService : InputMethodService() {
         }
     }
 
+    /** Перерисовывает всю клавиатуру, чтобы применить новую тему. Открытая панель остаётся открытой. */
+    private fun restyle() {
+        Colors.applyTheme(Prefs.theme(this))
+        setInputView(onCreateInputView())
+    }
+
     // ---------- Верхняя панель ----------
 
     private fun buildTopBar(): View {
@@ -340,8 +411,13 @@ class KlavService : InputMethodService() {
         clipScroll.visibility = if (p == Panel.CLIPS) View.VISIBLE else View.GONE
         settingsScroll.visibility = if (p == Panel.SETTINGS) View.VISIBLE else View.GONE
         punctScroll.visibility = if (p == Panel.PUNCT) View.VISIBLE else View.GONE
+        emojiPanelView.visibility = if (p == Panel.EMOJI) View.VISIBLE else View.GONE
         clipButton.setTextColor(if (p == Panel.CLIPS) CYAN else TEXT)
         settingsButton.setTextColor(if (p == Panel.SETTINGS) CYAN else TEXT)
+        if (p == Panel.EMOJI) {
+            renderEmojiTabs()
+            renderEmoji()
+        }
         if (p == Panel.CLIPS) refreshClips()
         updateSuggestions()
     }
@@ -372,6 +448,76 @@ class KlavService : InputMethodService() {
         return col
     }
 
+    // ---------- Эмодзи-панель ----------
+
+    private fun buildEmojiPanel(): LinearLayout {
+        val col = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(4), dp(2), dp(4), dp(4))
+        }
+        emojiTabs = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        col.addView(HorizontalScrollView(this).apply { addView(emojiTabs) }, LinearLayout.LayoutParams(MATCH, WRAP))
+        emojiBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        col.addView(ScrollView(this).apply { addView(emojiBox) }, LinearLayout.LayoutParams(MATCH, 0, 1f))
+        col.addView(key("ABC", 1f, active = true) { showPanel(Panel.KEYS) }.apply {
+            layoutParams = LinearLayout.LayoutParams(MATCH, dp(40)).apply { setMargins(dp(2), dp(4), dp(2), dp(2)) }
+        })
+        return col
+    }
+
+    /** Вкладки категорий. Первая — недавние. */
+    private fun renderEmojiTabs() {
+        emojiTabs.removeAllViews()
+        EMOJI_TABS.forEachIndexed { i, pair ->
+            emojiTabs.addView(TextView(this).apply {
+                text = pair.first
+                gravity = Gravity.CENTER
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
+                setPadding(dp(10), dp(4), dp(10), dp(4))
+                background = if (i == emojiCat) {
+                    roundRect(Appearance.keyFill(Prefs.keyAlpha(this@KlavService)), CYAN)
+                } else {
+                    null
+                }
+                setOnClickListener {
+                    emojiCat = i
+                    renderEmojiTabs()
+                    renderEmoji()
+                }
+            })
+        }
+    }
+
+    /** Сетка смайликов выбранной категории. Панель остаётся открытой, пока её не закроют. */
+    private fun renderEmoji() {
+        emojiBox.removeAllViews()
+        val items = if (emojiCat == 0) Prefs.recentEmoji(this) else EMOJI_TABS[emojiCat].second.split(" ")
+        if (items.isEmpty()) {
+            emojiBox.addView(hint("Пока пусто. Выбери смайлик, и он появится здесь."))
+            return
+        }
+        items.chunked(8).forEach { line ->
+            val r = row()
+            line.forEach { e ->
+                r.addView(TextView(this).apply {
+                    text = e
+                    gravity = Gravity.CENTER
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 24f)
+                    layoutParams = LinearLayout.LayoutParams(0, dp(46), 1f)
+                    setOnClickListener { insertEmoji(e) }
+                })
+            }
+            repeat(8 - line.size) { r.addView(View(this), LinearLayout.LayoutParams(0, dp(46), 1f)) }
+            emojiBox.addView(r)
+        }
+    }
+
+    private fun insertEmoji(e: String) {
+        Prefs.addRecentEmoji(this, e)
+        if (emojiCat == 0) renderEmoji()
+        commit(e)
+    }
+
     // ---------- Панель настроек визуала ----------
 
     private fun buildSettingsPanel(): LinearLayout {
@@ -392,6 +538,24 @@ class KlavService : InputMethodService() {
             Prefs.setKeySp(this, it)
             rebuildKeys()
         })
+        col.addView(hint("Тема"))
+        val themeRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val current = Prefs.theme(this)
+        THEMES.forEachIndexed { i, t ->
+            themeRow.addView(chip(t.name) {
+                Prefs.setTheme(this, i)
+                restyle()
+            }.apply {
+                setTextColor(if (i == current) CYAN else TEXT)
+            })
+        }
+        col.addView(HorizontalScrollView(this).apply { addView(themeRow) })
+        col.addView(hint("Клавиатура"))
+        col.addView(toggle("Ряд цифр над буквами", Prefs.numRow(this)) {
+            Prefs.setNumRow(this, it)
+            rebuildKeys()
+        })
+        col.addView(toggle("Свайп-ввод по буквам", Prefs.swipe(this)) { Prefs.setSwipe(this, it) })
         col.addView(hint("Отклик и анимации"))
         col.addView(toggle("Звук при нажатии", Prefs.sound(this)) { Prefs.setSound(this, it) })
         col.addView(toggle("Вибрация", Prefs.haptic(this)) { Prefs.setHaptic(this, it) })
@@ -480,6 +644,7 @@ class KlavService : InputMethodService() {
     /**
      * Три постоянные ячейки. Слева набранное слово, по центру главный вариант, справа второй.
      * Если курсор стоит на слове, которое исправила автозамена, по центру — исходное слово.
+     * Если слово ещё не набирается, а предыдущее закончено, — подсказки следующего слова.
      * Пустые ячейки не меняют высоту строки.
      */
     private fun updateSuggestions() {
@@ -505,7 +670,11 @@ class KlavService : InputMethodService() {
 
         val before = currentInputConnection?.getTextBeforeCursor(30, 0)?.toString() ?: ""
         val prefix = before.takeLastWhile { it.isLetter() }
-        val bar = Words.bar(prefix, lastLetterMode == Mode.RU)
+        val bar = if (prefix.isEmpty()) {
+            Words.Bar("", predictions(before))
+        } else {
+            Words.bar(prefix, lastLetterMode == Mode.RU)
+        }
 
         val typed = suggestChips[0]
         typed.text = bar.typed
@@ -523,15 +692,34 @@ class KlavService : InputMethodService() {
         }
     }
 
+    /** Предсказание следующего слова: только если курсор стоит сразу после предыдущего слова и пробела. */
+    private fun predictions(before: String): List<String> {
+        if (!before.endsWith(" ") || prevWord.isEmpty()) return emptyList()
+        val last = before.trimEnd(' ').takeLastWhile { it.isLetter() }.lowercase()
+        return if (last == prevWord) Words.predict(prevWord) else emptyList()
+    }
+
+    /** Запоминает законченное слово: пара «предыдущее → это» пойдёт в предсказания. */
+    private fun recordWord(w: String) {
+        if (w.isEmpty()) return
+        Words.learnPair(prevWord, w)
+        prevWord = w.lowercase()
+    }
+
+    private fun lastWordBefore(): String =
+        currentInputConnection?.getTextBeforeCursor(40, 0)?.toString()?.takeLastWhile { it.isLetter() } ?: ""
+
     /** Оставляет набранное слово как есть и запоминает его. */
     private fun acceptTyped(prefix: String) {
         Words.learn(prefix)
+        recordWord(prefix)
         currentInputConnection?.deleteSurroundingText(prefix.length, 0)
         commit("$prefix ")
     }
 
     private fun acceptCandidate(prefix: String, word: String) {
         currentInputConnection?.deleteSurroundingText(prefix.length, 0)
+        recordWord(word)
         commit("$word ")
     }
 
@@ -542,6 +730,7 @@ class KlavService : InputMethodService() {
         recentFixes.remove(h.fixed.lowercase())
         Words.learn(h.original)
         activeHint = null
+        recordWord(h.original)
         commit(h.original)
     }
 
@@ -610,10 +799,19 @@ class KlavService : InputMethodService() {
 
     private fun rebuildKeys() {
         keysArea.removeAllViews()
+        letterViews.clear()
         val rows = when (mode) {
             Mode.RU -> RU_ROWS
             Mode.EN -> EN_ROWS
             Mode.SYM -> SYM_ROWS
+        }
+        // Ряд цифр над буквами. В режиме символов цифры уже есть.
+        if (Prefs.numRow(this) && mode != Mode.SYM) {
+            val digits = row()
+            "1234567890".forEach { d ->
+                digits.addView(key(d.toString()) { onChar(d.toString()) })
+            }
+            keysArea.addView(digits)
         }
         rows.forEachIndexed { index, letters ->
             val line = row()
@@ -623,7 +821,15 @@ class KlavService : InputMethodService() {
             }
             letters.forEach { ch ->
                 val c = ch.toString()
-                line.addView(key(if (shift) c.uppercase() else c) { onChar(c) })
+                if (mode == Mode.SYM) {
+                    line.addView(key(c) { onChar(c) })
+                } else {
+                    val v = key(if (shift) c.uppercase() else c) { }
+                    v.tag = c
+                    v.setOnTouchListener(letterTouch)
+                    letterViews.add(v)
+                    line.addView(v)
+                }
             }
             if (index == 2) {
                 line.addView(key("⌫", 1.5f) { }.also { it.setOnTouchListener(deleteTouch) })
@@ -645,9 +851,10 @@ class KlavService : InputMethodService() {
             setMode(if (mode == Mode.SYM) lastLetterMode else Mode.SYM)
         })
         line.addView(key(if (letterTarget == Mode.RU) "RU" else "EN", 1.2f) { setMode(letterTarget) })
+        line.addView(key("😀", 1f) { togglePanel(Panel.EMOJI) })
         line.addView(key(",", 0.8f) { punct(",") })
         line.addView(
-            key(if (lastLetterMode == Mode.RU) "пробел" else "space", 3.6f) { }
+            key(if (lastLetterMode == Mode.RU) "пробел" else "space", 3.2f) { }
                 .also { it.setOnTouchListener(spaceTouch) }
         )
         // Долгое нажатие на точку открывает панель знаков препинания.
@@ -690,6 +897,18 @@ class KlavService : InputMethodService() {
                 true
             }
         }
+
+    /** Буква, над которой сейчас палец (для свайпа). */
+    private fun letterAt(x: Float, y: Float): String? {
+        val loc = IntArray(2)
+        for (v in letterViews) {
+            v.getLocationOnScreen(loc)
+            if (x >= loc[0] && x < loc[0] + v.width && y >= loc[1] && y < loc[1] + v.height) {
+                return v.tag as? String
+            }
+        }
+        return null
+    }
 
     private fun roundRect(fill: Int, stroke: Int) = GradientDrawable().apply {
         cornerRadius = dp(8).toFloat()
@@ -789,6 +1008,22 @@ class KlavService : InputMethodService() {
     }
 
     /**
+     * Свайп: слово выбирается по пути пальца. Заглавная ставится так же, как при обычном наборе.
+     */
+    private fun swipeCommit(path: String) {
+        val word = Words.swipe(path, lastLetterMode == Mode.RU) ?: return
+        val upper = shift || autoCapNow()
+        if (shift) {
+            shift = false
+            rebuildKeys()
+        }
+        val out = if (upper) word.replaceFirstChar { it.uppercase() } else word
+        Words.learn(out)
+        recordWord(out)
+        commit("$out ")
+    }
+
+    /**
      * Заглавная нужна в начале текста и сразу после точки, восклицательного или вопросительного знака,
      * с пробелом или без него.
      */
@@ -803,7 +1038,9 @@ class KlavService : InputMethodService() {
     /** Знаки препинания: сначала автозамена последнего слова, потом сам знак. */
     private fun punct(c: String) {
         autoCorrectWord()
+        recordWord(lastWordBefore())
         commit(c)
+        if (c == "." || c == "!" || c == "?") prevWord = ""
     }
 
     private fun spaceCommit() {
@@ -814,8 +1051,10 @@ class KlavService : InputMethodService() {
             currentInputConnection?.deleteSurroundingText(1, 0)
             commit(". ")
             lastSpaceAt = 0L
+            prevWord = ""
         } else {
             val fixed = autoCorrectWord()
+            recordWord(lastWordBefore())
             commit(" ")
             lastAuto = fixed
             lastSpaceAt = now
@@ -877,6 +1116,7 @@ class KlavService : InputMethodService() {
 
     private fun enter() {
         autoCorrectWord()
+        prevWord = ""
         val ic = currentInputConnection ?: return
         val info = currentInputEditorInfo
         val action = info.imeOptions and EditorInfo.IME_MASK_ACTION
@@ -911,6 +1151,17 @@ class KlavService : InputMethodService() {
             "-", "—", "…", "\"", "'", "«",
             "»", "(", ")", "@", "#", "/",
             "&", "%", "*", "+", "=", "№"
+        )
+
+        /** Вкладки эмодзи: значок и смайлики через пробел. Первая вкладка — недавние. */
+        private val EMOJI_TABS = listOf(
+            "🕘" to "",
+            "😀" to "😀 😃 😄 😁 😆 😅 😂 🤣 🙂 😉 😊 😇 🥰 😍 🤩 😘 😋 😎 🤔 😐 😴 😭 😡 🥺 😱 🤯 🥳",
+            "👋" to "👍 👎 👌 ✌️ 🤞 🤘 👏 🙌 🙏 👋 💪 🫶 ✋ 🤝 👀 🧠 💅",
+            "🐶" to "🐶 🐱 🐭 🐹 🐰 🦊 🐻 🐼 🐨 🐯 🦁 🐮 🐷 🐸 🐵 🐔 🐧 🐦 🦄 🐝 🦋 🐢 🐙 🐬",
+            "🍎" to "🍏 🍎 🍊 🍋 🍌 🍉 🍇 🍓 🍒 🍑 🥭 🍍 🥝 🍅 🥑 🍕 🍔 🍟 🌭 🍿 🍩 🍪 🎂 🍰 🍫 ☕ 🍵 🍺",
+            "⚽" to "⚽ 🏀 🏈 ⚾ 🎾 🏐 🎱 🏓 🥊 🎮 🎯 🎲 🎳 🏆 🥇 🎨 🎵 🎸 🎧 🎬 📷 🎤 🚴 🏃 🏊",
+            "❤️" to "❤️ 🧡 💛 💚 💙 💜 🖤 💔 ✨ ⭐ 🔥 💥 💫 🌈 ☀️ 🌙 ⚡ ❄️ 💧 🌸 🌹 🎉 🎁 💡 📌 📎 ✅ ❌ ⚠️ 💯"
         )
     }
 }

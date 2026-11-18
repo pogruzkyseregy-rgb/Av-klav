@@ -16,14 +16,35 @@ import android.net.Uri
 import org.json.JSONArray
 import org.json.JSONObject
 
-/** Палитра в стиле Авроры: тёмный фон, неоновый циан и розовый акцент. */
+/** Тема: акцент, второй акцент и цвет текста. */
+internal class Theme(val name: String, val accent: Int, val accent2: Int, val text: Int)
+
+internal val THEMES: List<Theme> = listOf(
+    Theme("Аврора", 0xFF3EE8FFL.toInt(), 0xFFFF4FD8L.toInt(), 0xFFE6F7FFL.toInt()),
+    Theme("Лёд", 0xFF9BE7FFL.toInt(), 0xFFFFFFFFL.toInt(), 0xFFF0FAFFL.toInt()),
+    Theme("Лава", 0xFFFF9A3EL.toInt(), 0xFFFF3D5AL.toInt(), 0xFFFFF1E6L.toInt()),
+    Theme("Изумруд", 0xFF3EFFA6L.toInt(), 0xFFB6FF3EL.toInt(), 0xFFE8FFF3L.toInt()),
+    Theme("Монохром", 0xFFFFFFFFL.toInt(), 0xFF9AA3B5L.toInt(), 0xFFF2F2F2L.toInt())
+)
+
+/**
+ * Цвета интерфейса. Меняются при смене темы; клавиатура пересоздаёт вид, чтобы применить их.
+ */
 internal object Colors {
-    val BG = 0xFF0B0F1A.toInt()
-    val STROKE = 0x663EE8FF.toInt()
-    val CYAN = 0xFF3EE8FF.toInt()
-    val PINK = 0xFFFF4FD8.toInt()
-    val TEXT = 0xFFE6F7FF.toInt()
-    val MUTED = 0xFF7F8AA3.toInt()
+    var BG = 0xFF0B0F1AL.toInt()
+    var STROKE = 0x663EE8FFL.toInt()
+    var CYAN = 0xFF3EE8FFL.toInt()
+    var PINK = 0xFFFF4FD8L.toInt()
+    var TEXT = 0xFFE6F7FFL.toInt()
+    var MUTED = 0xFF7F8AA3L.toInt()
+
+    fun applyTheme(index: Int) {
+        val t = THEMES[index.coerceIn(0, THEMES.size - 1)]
+        CYAN = t.accent
+        PINK = t.accent2
+        TEXT = t.text
+        STROKE = (t.accent and 0x00FFFFFF) or (0x66 shl 24)
+    }
 }
 
 /** Все пользовательские настройки. */
@@ -62,6 +83,16 @@ object Prefs {
     fun keyAlpha(ctx: Context) = i(ctx, "key_alpha", 20)
     fun setKeyAlpha(ctx: Context, v: Int) = setI(ctx, "key_alpha", v)
 
+    /** Индекс темы из [THEMES]. */
+    fun theme(ctx: Context) = i(ctx, "theme", 0)
+    fun setTheme(ctx: Context, v: Int) = setI(ctx, "theme", v)
+
+    fun numRow(ctx: Context) = b(ctx, "num_row", false)
+    fun setNumRow(ctx: Context, v: Boolean) = setB(ctx, "num_row", v)
+
+    fun swipe(ctx: Context) = b(ctx, "swipe", true)
+    fun setSwipe(ctx: Context, v: Boolean) = setB(ctx, "swipe", v)
+
     fun sound(ctx: Context) = b(ctx, "sfx", true)
     fun setSound(ctx: Context, v: Boolean) = setB(ctx, "sfx", v)
 
@@ -85,6 +116,15 @@ object Prefs {
 
     fun idleAnim(ctx: Context) = b(ctx, "idle_anim", true)
     fun setIdleAnim(ctx: Context, v: Boolean) = setB(ctx, "idle_anim", v)
+
+    /** Недавние эмодзи, по порядку от новых к старым. */
+    fun recentEmoji(ctx: Context): List<String> =
+        file(ctx).getString("emoji_recent", "").orEmpty().split(' ').filter { it.isNotEmpty() }
+
+    fun addRecentEmoji(ctx: Context, e: String) {
+        val list = (listOf(e) + recentEmoji(ctx).filter { it != e }).take(24)
+        file(ctx).edit().putString("emoji_recent", list.joinToString(" ")).apply()
+    }
 }
 
 /** Общие правила оформления: клавиатура и экран настроек рисуют фон одинаково. */
