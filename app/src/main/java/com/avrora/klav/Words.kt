@@ -56,7 +56,7 @@ internal object Words {
     private val adjacency: Map<Char, Set<Char>> by lazy { buildAdjacency() }
 
     /** Ручные исправления: они важнее словаря. */
-    private val FIXES: Map<String, String> = mapOf(
+    private val BASE_FIXES: Map<String, String> = mapOf(
         "спосибо" to "спасибо", "спасибио" to "спасибо", "спс" to "спасибо",
         "пожалуста" to "пожалуйста", "извени" to "извини", "здравствуте" to "здравствуйте",
         "сегодя" to "сегодня", "сегоння" to "сегодня", "сегдня" to "сегодня",
@@ -75,6 +75,65 @@ internal object Words {
         "ive" to "I've", "jsut" to "just", "realy" to "really", "plese" to "please",
         "thnks" to "thanks", "helo" to "hello", "whats" to "what's", "lets" to "let's",
         "i" to "I"
+    )
+
+    /**
+     * Расширенный список опечаток и вариантов написания. Ключи — ошибочные написания,
+     * а не настоящие слова; сокращения вроде «didnt» исправляются до проверки словаря.
+     */
+    private val FIXES: Map<String, String> = BASE_FIXES + mapOf(
+        "пожолуйста" to "пожалуйста", "пажалуйста" to "пожалуйста", "пожалуйтса" to "пожалуйста",
+        "пжлст" to "пожалуйста", "спасипо" to "спасибо", "сапсибо" to "спасибо",
+        "спасибр" to "спасибо", "спасибка" to "спасибо", "здраствуйте" to "здравствуйте",
+        "здраствуй" to "здравствуй", "здравствуте" to "здравствуйте", "конечна" to "конечно",
+        "чтоли" to "что ли", "никода" to "никогда", "вобще" to "вообще",
+        "вообщее" to "вообще", "вдргу" to "вдруг", "прасто" to "просто",
+        "посмотеть" to "посмотреть", "можеть" to "может", "мошет" to "может",
+        "очинь" to "очень", "потам" to "потом", "немношко" to "немножко",
+        "тожа" to "тоже", "вроди" to "вроде", "сечас" to "сейчас",
+        "интирисно" to "интересно", "кватира" to "квартира", "хочеш" to "хочешь",
+        "ничево" to "ничего", "харашо" to "хорошо", "харошо" to "хорошо",
+        "чуствую" to "чувствую", "завтро" to "завтра", "сигодня" to "сегодня",
+        "срачу" to "сразу", "дургой" to "другой", "друго" to "другое",
+        "нирмально" to "нормально", "нармально" to "нормально", "нормално" to "нормально",
+        "обяза" to "обязательно", "сапсем" to "совсем", "совсим" to "совсем",
+        "магу" to "могу", "могю" to "могу", "знаеш" to "знаешь",
+        "делоть" to "делать", "сдела" to "сделать", "понемаю" to "понимаю",
+        "понимаеш" to "понимаешь", "вместа" to "вместо", "еслли" to "если",
+        "приветт" to "привет", "спакойной" to "спокойной", "спокойнойночи" to "спокойной ночи",
+        "добрава" to "доброго", "вобшем" to "в общем", "вапше" to "вообще",
+        "ваще" to "вообще", "тлф" to "телефон", "фсе" to "все",
+        "щя" to "сейчас", "сичасс" to "сейчас", "неть" to "нет",
+        "ладна" to "ладно", "спс" to "спасибо", "accomodate" to "accommodate",
+        "acheive" to "achieve", "beleive" to "believe", "beleif" to "belief",
+        "calender" to "calendar", "cheif" to "chief", "collegue" to "colleague",
+        "comming" to "coming", "commitee" to "committee", "concious" to "conscious",
+        "dissapoint" to "disappoint", "enviroment" to "environment", "existance" to "existence",
+        "foriegn" to "foreign", "goverment" to "government", "gaurd" to "guard",
+        "happend" to "happened", "independant" to "independent", "knowlege" to "knowledge",
+        "maintainance" to "maintenance", "neccessary" to "necessary", "occassion" to "occasion",
+        "parlament" to "parliament", "persistant" to "persistent", "posession" to "possession",
+        "priviledge" to "privilege", "recomend" to "recommend", "refered" to "referred",
+        "relevent" to "relevant", "sucess" to "success", "suprise" to "surprise",
+        "tendancy" to "tendency", "truely" to "truly", "wich" to "which",
+        "wether" to "whether", "writting" to "writing", "accross" to "across",
+        "agian" to "again", "alredy" to "already", "baout" to "about",
+        "buisness" to "business", "chnage" to "change", "diffrent" to "different",
+        "eveyone" to "everyone", "exampel" to "example", "frist" to "first",
+        "hapen" to "happen", "imediately" to "immediately", "meating" to "meeting",
+        "mesage" to "message", "nothng" to "nothing", "peice" to "piece",
+        "wirte" to "write", "wouldnt" to "wouldn't", "shouldnt" to "shouldn't",
+        "couldnt" to "couldn't", "havent" to "haven't", "hasnt" to "hasn't",
+        "arent" to "aren't", "wasnt" to "wasn't", "werent" to "weren't",
+        "thats" to "that's", "theres" to "there's", "hes" to "he's",
+        "shes" to "she's", "theyre" to "they're", "weve" to "we've",
+        "recieved" to "received", "occurence" to "occurrence", "begining" to "beginning",
+        "beautifull" to "beautiful", "tommorrow" to "tomorrow", "wierd" to "weird",
+        "reccomend" to "recommend", "untill" to "until", "thru" to "through",
+        "probly" to "probably", "pleese" to "please", "sorri" to "sorry",
+        "tiem" to "time", "wnat" to "want", "waht" to "what",
+        "dya" to "do you", "didnt" to "didn't", "doesnt" to "doesn't",
+        "isnt" to "isn't"
     )
 
     /** Вызвать один раз при старте сервиса. Загружает личный словарь. */
