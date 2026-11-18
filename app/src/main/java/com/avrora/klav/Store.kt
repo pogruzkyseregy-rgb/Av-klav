@@ -79,6 +79,10 @@ object Prefs {
     fun keySp(ctx: Context) = i(ctx, "key_sp", 17)
     fun setKeySp(ctx: Context, v: Int) = setI(ctx, "key_sp", v)
 
+    /** Базовая высота клавиши в dp, 36..64. */
+    fun keyH(ctx: Context) = i(ctx, "key_h", 44)
+    fun setKeyH(ctx: Context, v: Int) = setI(ctx, "key_h", v)
+
     /** Непрозрачность заливки клавиш, 0..100 процентов. 0 — полностью прозрачные. */
     fun keyAlpha(ctx: Context) = i(ctx, "key_alpha", 20)
     fun setKeyAlpha(ctx: Context, v: Int) = setI(ctx, "key_alpha", v)

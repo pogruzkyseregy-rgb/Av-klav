@@ -17,8 +17,8 @@ android {
         minSdk = 24
         targetSdk = 34
         // При каждом обновлении увеличивай versionCode, иначе Android не поставит APK поверх.
-        versionCode = 10
-        versionName = "0.10.0"
+        versionCode = 11
+        versionName = "0.11.0"
     }
 
     signingConfigs {

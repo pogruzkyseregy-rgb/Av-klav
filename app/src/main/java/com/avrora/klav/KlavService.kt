@@ -632,6 +632,10 @@ class KlavService : InputMethodService() {
             Prefs.setKeySp(this, it)
             rebuildKeys()
         })
+        col.addView(slider("Высота клавиш", 28, Prefs.keyH(this), 36, " dp") {
+            Prefs.setKeyH(this, it)
+            rebuildKeys()
+        })
         col.addView(hint("Тема"))
         val themeRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         val current = Prefs.theme(this)
@@ -889,7 +893,7 @@ class KlavService : InputMethodService() {
     // ---------- Раскладка ----------
 
     /** Высота клавиши растёт вместе с размером букв, чтобы крупный текст не обрезался. */
-    private fun keyHeightDp(): Int = 44 + maxOf(0, Prefs.keySp(this) - 17) * 2
+    private fun keyHeightDp(): Int = Prefs.keyH(this) + maxOf(0, Prefs.keySp(this) - 17) * 2
 
     private fun rebuildKeys() {
         keysArea.removeAllViews()
