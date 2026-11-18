@@ -11,6 +11,7 @@ import android.view.inputmethod.InputContentInfo
 import android.widget.ImageView
 import android.widget.Toast
 import android.graphics.Color
+import android.graphics.PorterDuff
 import android.graphics.drawable.GradientDrawable
 import android.inputmethodservice.InputMethodService
 import android.media.AudioManager
@@ -81,6 +82,16 @@ class KlavService : InputMethodService() {
     private var downX = 0f
     private var downY = 0f
     private var downChar = ""
+
+    /** Долгое нажатие на букву: показывает варианты (ё, é, ñ…) в строке подсказок. */
+    private var longFired = false
+    private val longPressRunnable = Runnable {
+        val variants = ALTS[downChar]
+        if (variants != null) {
+            longFired = true
+            showVariants(variants)
+        }
+    }
 
     // Эмодзи-панель: выбранная вкладка.
     private var emojiCat = 1
@@ -179,10 +190,13 @@ class KlavService : InputMethodService() {
                 downX = e.rawX
                 downY = e.rawY
                 swipeMoved = false
+                longFired = false
+                handler.postDelayed(longPressRunnable, LONG_PRESS_MS)
             }
             MotionEvent.ACTION_MOVE -> {
                 if (!swipeMoved && hypot((e.rawX - downX).toDouble(), (e.rawY - downY).toDouble()) > dp(14).toDouble()) {
                     swipeMoved = true
+                    handler.removeCallbacks(longPressRunnable)
                 }
                 if (swipeMoved && Prefs.swipe(this)) {
                     val k = letterAt(e.rawX, e.rawY)
@@ -190,13 +204,18 @@ class KlavService : InputMethodService() {
                 }
             }
             MotionEvent.ACTION_UP -> {
-                if (Prefs.swipe(this) && swipeMoved && swipePath.length >= 3) {
+                handler.removeCallbacks(longPressRunnable)
+                if (longFired) {
+                    // Варианты уже показаны в строке подсказок: буква не печатается.
+                    longFired = false
+                } else if (Prefs.swipe(this) && swipeMoved && swipePath.length >= 3) {
                     swipeCommit(swipePath.toString())
                 } else {
                     onChar(downChar)
                 }
             }
             MotionEvent.ACTION_CANCEL -> {
+                handler.removeCallbacks(longPressRunnable)
                 swipeMoved = false
             }
             else -> return@OnTouchListener false
@@ -389,13 +408,27 @@ class KlavService : InputMethodService() {
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(8), 0, dp(4), 0)
         }
+        // Логотип AV перекрашивается в цвет темы, поэтому сделан из маски, а не картинкой как есть.
+        val logo = ImageView(this).apply {
+            setImageResource(R.drawable.av_logo)
+            adjustViewBounds = true
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            setColorFilter(CYAN, PorterDuff.Mode.SRC_IN)
+        }
         titleView = TextView(this).apply {
-            text = "✦ AVRORA"
+            text = "AVRORA"
             setTextColor(CYAN)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
             letterSpacing = 0.15f
+            setPadding(dp(6), 0, 0, 0)
         }
-        bar.addView(titleView, LinearLayout.LayoutParams(0, WRAP, 1f))
+        val titleBox = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(logo, LinearLayout.LayoutParams(WRAP, dp(16)))
+            addView(titleView, LinearLayout.LayoutParams(WRAP, WRAP))
+        }
+        bar.addView(titleBox, LinearLayout.LayoutParams(0, WRAP, 1f))
         clipButton = chip("📋 Буфер") { togglePanel(Panel.CLIPS) }
         settingsButton = chip("⚙") { togglePanel(Panel.SETTINGS) }
         bar.addView(clipButton, LinearLayout.LayoutParams(WRAP, WRAP))
@@ -959,6 +992,22 @@ class KlavService : InputMethodService() {
             }
         }
 
+    /** Показывает до трёх вариантов буквы в строке подсказок. Нажатие на вариант вставляет его. */
+    private fun showVariants(variants: List<String>) {
+        if (!::suggestChips.isInitialized) return
+        buzz()
+        suggestBar.visibility = View.VISIBLE
+        val shown = variants.take(suggestChips.size)
+        suggestChips.forEachIndexed { i, chip ->
+            val v = shown.getOrNull(i)
+            chip.text = v?.let { if (shift) it.uppercase() else it } ?: ""
+            chip.setTextColor(if (i == 0) CYAN else TEXT)
+            chip.setOnClickListener(
+                if (v == null) null else View.OnClickListener { commit(if (shift) v.uppercase() else v) }
+            )
+        }
+    }
+
     /** Буква, над которой сейчас палец (для свайпа). */
     private fun letterAt(x: Float, y: Float): String? {
         val loc = IntArray(2)
@@ -1201,6 +1250,16 @@ class KlavService : InputMethodService() {
         private val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
 
         private const val STICKER_DIR = "stickers"
+
+        private const val LONG_PRESS_MS = 450L
+
+        /** Варианты букв при долгом нажатии, самые частые первыми. */
+        private val ALTS: Map<String, List<String>> = mapOf(
+            "е" to listOf("ё"), "ь" to listOf("ъ"),
+            "a" to listOf("à", "á", "ä"), "e" to listOf("é", "è", "ê"), "i" to listOf("í", "ì", "ï"),
+            "o" to listOf("ó", "ö", "ô"), "u" to listOf("ú", "ü", "ù"), "c" to listOf("ç"),
+            "n" to listOf("ñ"), "s" to listOf("ß", "ś"), "y" to listOf("ÿ")
+        )
 
         private const val IDLE_MIN_MS = 5000L
         private const val IDLE_RANGE_MS = 4000L
