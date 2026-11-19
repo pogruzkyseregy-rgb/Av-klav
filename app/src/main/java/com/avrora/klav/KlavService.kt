@@ -546,13 +546,25 @@ class KlavService : InputMethodService() {
         items.chunked(8).forEach { line ->
             val r = row()
             line.forEach { e ->
-                r.addView(TextView(this).apply {
-                    text = e
-                    gravity = Gravity.CENTER
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 24f)
-                    layoutParams = LinearLayout.LayoutParams(0, dp(46), 1f)
-                    setOnClickListener { insertEmoji(e) }
-                })
+                if (e == "AV") {
+                    // В панели показываем сам логотип; в поле ввода уходит текст «AV».
+                    r.addView(ImageView(this).apply {
+                        setImageResource(R.drawable.av_logo)
+                        scaleType = ImageView.ScaleType.FIT_CENTER
+                        setColorFilter(CYAN, PorterDuff.Mode.SRC_IN)
+                        setPadding(dp(6), dp(10), dp(6), dp(10))
+                        layoutParams = LinearLayout.LayoutParams(0, dp(46), 1f)
+                        setOnClickListener { insertEmoji(e) }
+                    })
+                } else {
+                    r.addView(TextView(this).apply {
+                        text = e
+                        gravity = Gravity.CENTER
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 24f)
+                        layoutParams = LinearLayout.LayoutParams(0, dp(46), 1f)
+                        setOnClickListener { insertEmoji(e) }
+                    })
+                }
             }
             repeat(8 - line.size) { r.addView(View(this), LinearLayout.LayoutParams(0, dp(46), 1f)) }
             emojiBox.addView(r)
