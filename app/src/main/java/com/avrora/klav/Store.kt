@@ -91,7 +91,7 @@ object Prefs {
     fun theme(ctx: Context) = i(ctx, "theme", 0)
     fun setTheme(ctx: Context, v: Int) = setI(ctx, "theme", v)
 
-    fun numRow(ctx: Context) = b(ctx, "num_row", false)
+    fun numRow(ctx: Context) = b(ctx, "num_row", true)
     fun setNumRow(ctx: Context, v: Boolean) = setB(ctx, "num_row", v)
 
     fun swipe(ctx: Context) = b(ctx, "swipe", true)

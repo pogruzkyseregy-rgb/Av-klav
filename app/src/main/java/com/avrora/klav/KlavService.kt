@@ -1051,17 +1051,25 @@ class KlavService : InputMethodService() {
 
     /** Глитч при нажатии, если он включён в настройках. */
     private fun glitch(v: View) {
-        if (Prefs.glitch(this)) flashKey(v)
+        flashKey(v)
     }
 
     /** Короткий сдвиг клавиши и розовая тень. */
     private fun flashKey(v: View) {
-        v.animate().cancel()
-        v.translationX = dp(2).toFloat()
-        v.animate().translationX(0f).setDuration(120).start()
+        // Вспышка холодного флюорита: контур и свечение клавиши на короткое время становятся голубыми.
         val tv = v as? TextView ?: return
-        tv.setShadowLayer(dp(2).toFloat(), -dp(2).toFloat(), 0f, PINK)
-        tv.postDelayed({ tv.setShadowLayer(0f, 0f, 0f, 0) }, 120)
+        val bg = tv.background as? GradientDrawable
+        tv.animate().cancel()
+        if (Prefs.glitch(this)) {
+            v.translationX = dp(2).toFloat()
+            v.animate().translationX(0f).setDuration(120).start()
+        }
+        bg?.setStroke(dp(2), CYAN)
+        tv.setShadowLayer(dp(10).toFloat(), 0f, 0f, CYAN)
+        tv.postDelayed({
+            tv.setShadowLayer(0f, 0f, 0f, 0)
+            bg?.setStroke(dp(1), STROKE)
+        }, 180)
     }
 
     // ---------- Idle-анимация ----------
@@ -1287,7 +1295,7 @@ class KlavService : InputMethodService() {
             "🐶" to "🐶 🐱 🐭 🐹 🐰 🦊 🐻 🐼 🐨 🐯 🦁 🐮 🐷 🐸 🐵 🐔 🐧 🐦 🦄 🐝 🦋 🐢 🐙 🐬",
             "🍎" to "🍏 🍎 🍊 🍋 🍌 🍉 🍇 🍓 🍒 🍑 🥭 🍍 🥝 🍅 🥑 🍕 🍔 🍟 🌭 🍿 🍩 🍪 🎂 🍰 🍫 ☕ 🍵 🍺",
             "⚽" to "⚽ 🏀 🏈 ⚾ 🎾 🏐 🎱 🏓 🥊 🎮 🎯 🎲 🎳 🏆 🥇 🎨 🎵 🎸 🎧 🎬 📷 🎤 🚴 🏃 🏊",
-            "❤️" to "❤️ 🧡 💛 💚 💙 💜 🖤 💔 ✨ ⭐ 🔥 💥 💫 🌈 ☀️ 🌙 ⚡ ❄️ 💧 🌸 🌹 🎉 🎁 💡 📌 📎 ✅ ❌ ⚠️ 💯",
+            "❤️" to "AV ❤️ 🧡 💛 💚 💙 💜 🖤 💔 ✨ ⭐ 🔥 💥 💫 🌈 ☀️ 🌙 ⚡ ❄️ 💧 🌸 🌹 🎉 🎁 💡 📌 📎 ✅ ❌ ⚠️ 💯",
             // Последняя вкладка — стикеры Авроры (см. renderEmoji).
             "🦊" to "STICKERS"
         )
