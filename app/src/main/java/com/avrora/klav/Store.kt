@@ -98,6 +98,14 @@ object Prefs {
     fun setSwipe(ctx: Context, v: Boolean) = setB(ctx, "swipe", v)
 
     fun sound(ctx: Context) = b(ctx, "sfx", true)
+
+    /** Стиль клика: 0 — сухой тик, 1 — стеклянный, 2 — квантовый шум. */
+    fun soundStyle(ctx: Context) = i(ctx, "sfx_style", 0)
+    fun setSoundStyle(ctx: Context, v: Int) = setI(ctx, "sfx_style", v)
+
+    /** Громкость клика, 0..100. Низкое значение — тихий режим для ночи. */
+    fun soundVol(ctx: Context) = i(ctx, "sfx_vol", 35)
+    fun setSoundVol(ctx: Context, v: Int) = setI(ctx, "sfx_vol", v)
     fun setSound(ctx: Context, v: Boolean) = setB(ctx, "sfx", v)
 
     fun haptic(ctx: Context) = b(ctx, "haptic", true)

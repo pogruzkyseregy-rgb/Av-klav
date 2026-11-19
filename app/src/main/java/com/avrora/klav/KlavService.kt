@@ -15,7 +15,9 @@ import android.graphics.PorterDuff
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.inputmethodservice.InputMethodService
+import android.media.AudioAttributes
 import android.media.AudioManager
+import android.media.SoundPool
 import android.media.ToneGenerator
 import android.os.Build
 import android.os.Handler
@@ -63,6 +65,8 @@ class KlavService : InputMethodService() {
     private var shift = false
     private var panel = Panel.KEYS
     private var tone: ToneGenerator? = null
+    private var soundPool: SoundPool? = null
+    private val clickIds = IntArray(3)
     private var lastSpaceAt = 0L
 
     /** Последняя автозамена пробелом: (что набрал, на что заменили). Нужна для отмены Backspace. */
@@ -262,6 +266,17 @@ class KlavService : InputMethodService() {
         Words.init(this)
         Thread { Words.warm() }.start()
         clipboard.addPrimaryClipChangedListener(clipListener)
+        soundPool = SoundPool.Builder()
+            .setMaxStreams(4)
+            .setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_ASSISTANCE_SONIFICATION)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                    .build()
+            )
+            .build()
+        val raw = intArrayOf(R.raw.tick, R.raw.glass, R.raw.quant)
+        raw.forEachIndexed { i, res -> clickIds[i] = soundPool!!.load(this, res, 1) }
         tone = try {
             ToneGenerator(AudioManager.STREAM_SYSTEM, 35)
         } catch (e: RuntimeException) {
@@ -274,6 +289,8 @@ class KlavService : InputMethodService() {
         handler.removeCallbacksAndMessages(null)
         tone?.release()
         tone = null
+        soundPool?.release()
+        soundPool = null
         super.onDestroy()
     }
 
@@ -423,6 +440,13 @@ class KlavService : InputMethodService() {
             typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
             letterSpacing = 0.08f
             setPadding(dp(6), 0, 0, 0)
+        }
+        // Долгое нажатие на логотип-заголовок выключает и включает звук клавиш одним жестом.
+        titleView.setOnLongClickListener {
+            val on = !Prefs.sound(this)
+            Prefs.setSound(this, on)
+            Toast.makeText(this, if (on) "Звук включён" else "Звук выключен", Toast.LENGTH_SHORT).show()
+            true
         }
         val titleBox = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -684,6 +708,19 @@ class KlavService : InputMethodService() {
         col.addView(toggle("Свайп-ввод по буквам", Prefs.swipe(this)) { Prefs.setSwipe(this, it) })
         col.addView(hint("Отклик и анимации"))
         col.addView(toggle("Звук при нажатии", Prefs.sound(this)) { Prefs.setSound(this, it) })
+        col.addView(hint("Стиль клика"))
+        val styleRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val curStyle = Prefs.soundStyle(this)
+        CLICK_STYLES.forEachIndexed { i, name ->
+            styleRow.addView(chip(name) {
+                Prefs.setSoundStyle(this, i)
+                restyle()
+            }.apply { setTextColor(if (i == curStyle) CYAN else TEXT) })
+        }
+        col.addView(HorizontalScrollView(this).apply { addView(styleRow) })
+        col.addView(slider("Громкость клика", 100, Prefs.soundVol(this), 0, "%") {
+            Prefs.setSoundVol(this, it)
+        })
         col.addView(toggle("Вибрация", Prefs.haptic(this)) { Prefs.setHaptic(this, it) })
         col.addView(toggle("Глитч при нажатии", Prefs.glitch(this)) { Prefs.setGlitch(this, it) })
         col.addView(toggle("Анимация простоя", Prefs.idleAnim(this)) {
@@ -1065,7 +1102,7 @@ class KlavService : InputMethodService() {
 
     private fun feedback(v: View) {
         scheduleIdle()
-        if (Prefs.sound(this)) tone?.startTone(ToneGenerator.TONE_PROP_BEEP2, 10)
+        playClick()
         buzz()
         glitch(v)
     }
@@ -1078,6 +1115,15 @@ class KlavService : InputMethodService() {
             @Suppress("DEPRECATION")
             vibrator.vibrate(12L)
         }
+    }
+
+    /** Звук клика выбранного стиля и громкости. Выключается переключателем или долгим нажатием на логотип. */
+    private fun playClick() {
+        if (!Prefs.sound(this)) return
+        val vol = Prefs.soundVol(this) / 100f
+        if (vol <= 0f) return
+        val id = clickIds.getOrNull(Prefs.soundStyle(this)) ?: return
+        soundPool?.play(id, vol, vol, 1, 0, 1f)
     }
 
     /** Глитч при нажатии, если он включён в настройках. */
@@ -1339,6 +1385,8 @@ class KlavService : InputMethodService() {
         private val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
 
         private const val STICKER_DIR = "stickers"
+
+        private val CLICK_STYLES = listOf("Тик", "Стекло", "Квант")
 
         private val QUESTION_WORDS = setOf(
             "кто", "что", "где", "куда", "откуда", "когда", "почему", "зачем", "как", "какой", "какая",
