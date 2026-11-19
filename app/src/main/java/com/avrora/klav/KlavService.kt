@@ -12,6 +12,7 @@ import android.widget.ImageView
 import android.widget.Toast
 import android.graphics.Color
 import android.graphics.PorterDuff
+import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.inputmethodservice.InputMethodService
 import android.media.AudioManager
@@ -537,6 +538,20 @@ class KlavService : InputMethodService() {
         if (emojiCat == EMOJI_TABS.lastIndex) {
             renderStickers()
             return
+        }
+        if (EMOJI_TABS[emojiCat].first == "❤️") {
+            // Текстовый рисунок логотипа AV: одна кнопка сверху, вставляет всё целиком.
+            emojiBox.addView(TextView(this).apply {
+                text = AV_ART.joinToString("\n")
+                typeface = Typeface.MONOSPACE
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 7f)
+                setTextColor(CYAN)
+                gravity = Gravity.CENTER
+                setPadding(dp(4), dp(6), dp(4), dp(6))
+                background = roundRect(Appearance.keyFill(Prefs.keyAlpha(this@KlavService)), STROKE)
+                layoutParams = LinearLayout.LayoutParams(MATCH, WRAP).apply { setMargins(0, dp(4), 0, dp(6)) }
+                setOnClickListener { commit(AV_ART.joinToString("\n")) }
+            })
         }
         val items =if (emojiCat == 0) Prefs.recentEmoji(this) else EMOJI_TABS[emojiCat].second.split(" ")
         if (items.isEmpty()) {
@@ -1300,6 +1315,24 @@ class KlavService : InputMethodService() {
         )
 
         /** Вкладки эмодзи: значок и смайлики через пробел. Первая вкладка — недавние. */
+        /** Логотип AV из символов ASCII (# + .), вставляется как обычный текст. */
+        private val AV_ART = listOf(
+            "   ..                              ..",
+            "    .#+                          +#.",
+            "      ###.                    .###",
+            " .++   +###.                 ####   .+.",
+            "   .##+ .###.  ### ###     .###. .##+",
+            "     +###+### ####+.##+   .###+###+",
+            "       ##### ###### ###  .#######",
+            "        .#+.### .##+.###.###+##.",
+            "          .### .#### ###### #+",
+            "         .###    .##+.###+.#",
+            "        .#+.  .   ### ##...",
+            "                  .###",
+            "                   ###",
+            "                   .+"
+        )
+
         private val EMOJI_TABS = listOf(
             "🕘" to "",
             "😀" to "😀 😃 😄 😁 😆 😅 😂 🤣 🙂 😉 😊 😇 🥰 😍 🤩 😘 😋 😎 🤔 😐 😴 😭 😡 🥺 😱 🤯 🥳",
