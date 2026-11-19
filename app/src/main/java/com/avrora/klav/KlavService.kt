@@ -417,10 +417,11 @@ class KlavService : InputMethodService() {
             setColorFilter(CYAN, PorterDuff.Mode.SRC_IN)
         }
         titleView = TextView(this).apply {
-            text = "AVRORA"
+            text = "AvrorA"
             setTextColor(CYAN)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-            letterSpacing = 0.15f
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            letterSpacing = 0.08f
             setPadding(dp(6), 0, 0, 0)
         }
         val titleBox = LinearLayout(this).apply {
@@ -697,6 +698,9 @@ class KlavService : InputMethodService() {
             updateSuggestions()
         })
         col.addView(toggle("Точка двойным пробелом", Prefs.doubleSpace(this)) { Prefs.setDoubleSpace(this, it) })
+        col.addView(toggle("Вопрос «?» вместо точки после вопросительного слова", Prefs.autoQuestion(this)) {
+            Prefs.setAutoQuestion(this, it)
+        })
         col.addView(chip("Готово") { showPanel(Panel.KEYS) }.apply {
             layoutParams = LinearLayout.LayoutParams(WRAP, WRAP).apply { setMargins(0, dp(8), 0, 0) }
         })
@@ -1186,13 +1190,50 @@ class KlavService : InputMethodService() {
 
     /** Знаки препинания: сначала автозамена последнего слова, потом сам знак. */
     private fun punct(c: String) {
+        val ic = currentInputConnection
+        // Две точки подряд дают многоточие.
+        if (c == "." && ic?.getTextBeforeCursor(2, 0)?.toString() == "..") {
+            ic.deleteSurroundingText(2, 0)
+            commit("…")
+            prevWord = ""
+            return
+        }
         autoCorrectWord()
         recordWord(lastWordBefore())
-        commit(c)
-        if (c == "." || c == "!" || c == "?") prevWord = ""
+        val out = if (c == "." && Prefs.autoQuestion(this) && isQuestion()) "?" else c
+        commit(out)
+        if (out == "." || out == "!" || out == "?") prevWord = ""
+    }
+
+    /** Предложение начинается с вопросительного слова и состоит хотя бы из двух слов. */
+    private fun isQuestion(): Boolean {
+        val before = currentInputConnection?.getTextBeforeCursor(300, 0)?.toString() ?: return false
+        val cut = before.indexOfLast { it == '.' || it == '!' || it == '?' || it == '\n' }
+        val sentence = before.substring(cut + 1).trim()
+        val first = sentence.takeWhile { it.isLetter() }.lowercase()
+        return first.isNotEmpty() && first in QUESTION_WORDS && sentence.split(' ').size >= 2
+    }
+
+    /** Дефис, поставленный как тире (в начале строки или после пробела), становится «—». «--» тоже. */
+    private fun fixDashes() {
+        val ic = currentInputConnection ?: return
+        val b = ic.getTextBeforeCursor(3, 0)?.toString() ?: return
+        if (b.endsWith("--")) {
+            ic.deleteSurroundingText(2, 0)
+            commit("—")
+            return
+        }
+        if (b.endsWith("-")) {
+            val prev = b.dropLast(1).lastOrNull()
+            if (prev == null || prev == ' ' || prev == '\n') {
+                ic.deleteSurroundingText(1, 0)
+                commit("—")
+            }
+        }
     }
 
     private fun spaceCommit() {
+        fixDashes()
         val now = System.currentTimeMillis()
         val before = currentInputConnection?.getTextBeforeCursor(2, 0)?.toString() ?: ""
         val doubleTap = Prefs.doubleSpace(this) && now - lastSpaceAt < 400L
@@ -1215,11 +1256,20 @@ class KlavService : InputMethodService() {
      * Возвращает (что было набрано, на что заменили) или null.
      */
     private fun autoCorrectWord(): Pair<String, String>? {
-        if (!Prefs.autoCorrect(this)) return null
         val ic = currentInputConnection ?: return null
         val before = ic.getTextBeforeCursor(40, 0)?.toString() ?: return null
         val word = before.takeLastWhile { it.isLetter() || it == '\'' }
         if (word.isEmpty()) return null
+        // Имена пишутся с заглавной даже при выключенной автозамене.
+        if (Prefs.autoCap(this)) {
+            val name = Words.nameCase(word)
+            if (name != null && name != word) {
+                ic.deleteSurroundingText(word.length, 0)
+                ic.commitText(name, 1)
+                return null
+            }
+        }
+        if (!Prefs.autoCorrect(this)) return null
         val prior = before.dropLast(word.length).trimEnd(' ')
         val sentenceStart = prior.isEmpty() || prior.last() in ".!?\n"
         val fix = Words.correction(word, sentenceStart) ?: return null
@@ -1289,6 +1339,12 @@ class KlavService : InputMethodService() {
         private val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
 
         private const val STICKER_DIR = "stickers"
+
+        private val QUESTION_WORDS = setOf(
+            "кто", "что", "где", "куда", "откуда", "когда", "почему", "зачем", "как", "какой", "какая",
+            "какое", "какие", "сколько", "чей", "чья", "чьё", "чьи",
+            "who", "what", "where", "when", "why", "how", "which", "whose"
+        )
 
         private const val LONG_PRESS_MS = 450L
 

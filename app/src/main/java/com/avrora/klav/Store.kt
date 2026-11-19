@@ -115,6 +115,10 @@ object Prefs {
     fun suggest(ctx: Context) = b(ctx, "suggest", true)
     fun setSuggest(ctx: Context, v: Boolean) = setB(ctx, "suggest", v)
 
+    /** Вопросительный знак вместо точки, если предложение начинается с вопросительного слова. */
+    fun autoQuestion(ctx: Context) = b(ctx, "auto_q", true)
+    fun setAutoQuestion(ctx: Context, v: Boolean) = setB(ctx, "auto_q", v)
+
     fun doubleSpace(ctx: Context) = b(ctx, "double_space", true)
     fun setDoubleSpace(ctx: Context, v: Boolean) = setB(ctx, "double_space", v)
 
